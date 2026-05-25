@@ -1,62 +1,38 @@
 # UnixDrop
 
-UnixDrop is a small cross-device sync tool for a macOS sender and a Linux receiver on the same Tailscale network.
+UnixDrop is a small **desk bridge** between a MacBook and a Linux ThinkPad.
 
-It is built for this flow:
+The architecture stays simple:
 
-- You are browsing on your Mac.
-- A link is copied, or a file is dropped into a sync folder.
-- The Linux machine receives it over Tailscale.
-- Links can be opened automatically on Linux.
-- Files are stored in a local inbox on Linux.
-- An Obsidian vault can be synced between both machines through the Linux receiver.
+- **Mac Agent** pushes clipboard text, active browser tabs, and dropped files.
+- **Linux Receiver** accepts data over HTTP and stores/opens it.
 
-## What This MVP Does
+This project does **not** implement mouse/keyboard sharing. Use Input Leap or Barrier for HID.
 
-- Runs a Linux user service that exposes a small HTTP receiver.
-- Runs a macOS user agent that:
-  - polls the clipboard for URLs
-  - watches a local folder for files to upload
-  - syncs an Obsidian vault against Linux if enabled
-- Authenticates requests with a shared token.
-- Stores received files and a link log on Linux.
+## Purpose
 
-## Layout
+Make both machines feel like one desk:
 
-- `unixdrop/linux_service.py`: Linux receiver service
-- `unixdrop/mac_agent.py`: macOS sender agent
-- `unixdrop/config.py`: shared config loader
-- `systemd/unixdrop-receiver.service`: Linux user service template
-- `launchd/com.unixdrop.agent.plist`: macOS LaunchAgent template
-- `scripts/install_linux_service.sh`: installs the Linux user service
-- `scripts/install_mac_agent.sh`: installs the macOS LaunchAgent
+- Copy text here, paste there.
+- Press hotkey, tab opens there.
+- Drop file here, file appears there.
 
-## Config
+## Features
 
-Copy `config.example.json` to:
-
-- macOS: `~/.config/unixdrop/config.json`
-- Linux: `~/.config/unixdrop/config.json`
-
-Then adjust the values for each machine.
-
-The important values:
-
-- `auth_token`: same on both machines
-- `receiver_url`: on macOS, set this to the Linux Tailscale URL, for example `http://100.x.y.z:8765`
-- `inbox_dir`: where Linux stores received files
-- `sync_dir`: where macOS watches for files to send
-- `obsidian_enabled`: turn vault sync on or off
-- `obsidian_vault_dir`: path to the same Obsidian vault on each machine
-- `obsidian_poll_seconds`: how often the Mac checks and syncs the vault
+- Shared clipboard bridge with explicit direction modes.
+- Active tab send from macOS to Linux.
+- Drag/drop style file sending from macOS drop folder to Linux inbox.
+- Linux inbox conflict-safe writes.
+- Health and status commands.
+- Optional Obsidian vault sync (kept separate from desk bridge core).
 
 ## Install
 
 ### Linux receiver
 
-1. Put the project on the Linux machine.
-2. Create `~/.config/unixdrop/config.json`.
-3. Run:
+1. Put this repo on Linux.
+2. Create `~/.config/unixdrop/config.json` from `config.example.json`.
+3. Install service:
 
 ```bash
 ./scripts/install_linux_service.sh
@@ -65,66 +41,155 @@ systemctl --user enable --now unixdrop-receiver.service
 
 ### macOS agent
 
-1. Put the project on the Mac.
-2. Create `~/.config/unixdrop/config.json`.
-3. Run:
+1. Put this repo on macOS.
+2. Create `~/.config/unixdrop/config.json` from `config.example.json`.
+3. Install agent:
 
 ```bash
 ./scripts/install_mac_agent.sh
 launchctl load ~/Library/LaunchAgents/com.unixdrop.agent.plist
 ```
 
-## Usage
+## Commands
 
-### Sync a link
-
-- Copy a URL on macOS. The agent will notice it and send it.
-- On Linux, the service can automatically run `xdg-open` if `auto_open_links` is `true`.
-- If you want to push the active Safari, Chrome, or Arc tab directly, run:
+Run from repo root:
 
 ```bash
-python3 -m unixdrop.send_browser_url
+./deskbridge tab
+./deskbridge tab --browser safari
+./deskbridge tab --no-open
+./deskbridge status
+./deskbridge health
 ```
 
-### Sync a file
-
-- Drop a file into the configured macOS `sync_dir`.
-- The agent uploads it to Linux.
-- The file appears in the configured Linux `inbox_dir`.
-
-### Sync an Obsidian vault
-
-- Set `obsidian_enabled` to `true` on both machines.
-- Point `obsidian_vault_dir` to your vault path on each machine.
-- Keep the Linux receiver running and the macOS agent loaded.
-- Mac changes are pushed to Linux.
-- Linux changes are pulled back to Mac on the next poll.
-
-This is bidirectional through Linux as the hub. It is much better than Git for active note edits, but it still keeps the logic intentionally simple:
-
-- no delete propagation yet
-- conflicts create a `*.linux-conflict-xxxxxxxx.md` style sibling copy on Mac
-- workspace and cache files are excluded by default
-
-### Check sync status
-
-Run this on the Mac:
+Compatibility wrappers:
 
 ```bash
-python3 -m unixdrop.status
+./scripts/send_current_tab.sh
+./scripts/status.sh
+./scripts/health.sh
+./scripts/run_mac_agent.sh
+./scripts/run_linux_receiver.sh
 ```
 
-It shows:
+## Clipboard Modes
 
-- whether the Linux receiver is reachable
-- whether Obsidian sync is enabled
-- local vs remote vault file counts
-- mismatched files and one-sided files
-- when the local sync state was last written
+Use `clipboard.mode` (or top-level `clipboard_mode`):
 
-## Notes
+- `off`: disable clipboard sync
+- `mac_to_linux`: Mac clipboard pushes to Linux
+- `linux_to_mac`: Linux clipboard pulls to Mac
+- `two_way`: both directions with loop protection
 
-- This is intentionally simple and avoids external Python dependencies.
-- The Linux receiver is a user service, not a system service, because opening links should happen in your desktop session.
-- Clipboard-based URL sync is the most reliable always-on approach without building a browser extension.
-- For Obsidian, this is viable for a personal two-device setup. If you later want delete propagation, rename tracking, or more than two peers, you should switch that part to Syncthing instead of growing custom sync logic forever.
+Rules:
+
+- plain text only
+- `max_chars`/`max_clipboard_chars` limit (default `20000`)
+- large clipboard payloads are ignored
+
+### Backward compatibility
+
+Old keys still work:
+
+- `clipboard_sync_enabled`
+- `shared_clipboard_enabled`
+
+They are mapped to `clipboard_mode` with a deprecation warning.
+
+## Drop to ThinkPad Workflow
+
+Defaults:
+
+- macOS drop folder: `~/Drop to ThinkPad`
+- Linux inbox: `~/Inbox/MacDrop`
+
+Behavior:
+
+- Mac agent watches drop folder.
+- Upload waits until file appears stable (not still writing).
+- Max upload size defaults to `500 MB` (`max_file_mb`).
+- Linux preserves filename.
+- If target exists, Linux writes:
+  - `file.txt`
+  - `file (conflict YYYY-MM-DD HH-MM-SS).txt`
+- Local files are kept by default (`delete_after_send = false`).
+
+## Tab Send Workflow
+
+`deskbridge tab` reads active URL from supported browsers:
+
+- Safari
+- Google Chrome
+- Arc
+- Brave
+- Chromium
+- Microsoft Edge
+- Vivaldi
+- Opera
+
+Linux behavior:
+
+- If `auto_open_links=true` and no `--no-open`, URL opens via `xdg-open`.
+- Otherwise URL is appended to `~/Inbox/MacDrop/links.md`.
+
+## Status and Health
+
+`deskbridge status` shows:
+
+- macOS agent running
+- Linux receiver reachable
+- receiver version
+- `auto_open_links`
+- `clipboard_mode`
+- drop folder and inbox paths
+- pending drop files
+- last upload result
+- Obsidian enabled + vault drift summary
+- Input Leap/Barrier note
+
+`deskbridge health` checks:
+
+- receiver HTTP reachability
+- auth ping endpoint
+- clipboard roundtrip (when enabled)
+- Linux inbox write test
+- `xdg-open` availability on Linux
+- macOS browser script availability
+- drop folder existence
+- launchd/systemd status checks (when available)
+
+## Obsidian Sync
+
+Obsidian is supported but separate from core desk bridge ergonomics.
+
+Use the `obsidian` section:
+
+- `enabled`
+- `local_vault`
+- `remote_vault`
+- `conflict_strategy` (currently `copy`)
+
+Current behavior remains intentionally simple:
+
+- bidirectional sync via Linux receiver
+- conflict copies on Mac
+- excludes cache/workspace paths
+- no delete propagation
+
+## Input Leap / Barrier
+
+Mouse/keyboard sharing is external to UnixDrop.
+
+Recommended setup:
+
+- install Input Leap or Barrier
+- MacBook as server
+- ThinkPad as client
+- keep UnixDrop focused on clipboard/tab/file workflows
+
+## Safety Notes
+
+- No file execution on receive.
+- No automatic opening of received files.
+- Only URLs can auto-open (via `xdg-open`) when enabled.
+- File uploads are size-limited and filename-sanitized.

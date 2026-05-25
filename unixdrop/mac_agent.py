@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib import parse, request
 
-from unixdrop.config import load_config
-from unixdrop.vault import build_manifest, file_sha256
+from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, load_config
+from unixdrop.vault import build_manifest, file_sha256, should_skip_relative
 
 
 CONFIG = load_config()
@@ -16,13 +17,21 @@ STATE_FILE = CONFIG.state_dir / "mac_state.json"
 
 
 def _ensure_dirs() -> None:
-    CONFIG.sync_dir.mkdir(parents=True, exist_ok=True)
+    CONFIG.drop_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.state_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _load_state() -> dict:
     if not STATE_FILE.exists():
-        return {"last_clipboard": "", "files": {}, "vault": {}}
+        return {
+            "files": {},
+            "drop_pending": {},
+            "vault": {},
+            "last_upload_result": "none",
+            "last_local_clipboard_hash": "",
+            "last_remote_clipboard_hash": "",
+            "last_remote_applied_hash": "",
+        }
     return json.loads(STATE_FILE.read_text())
 
 
@@ -31,6 +40,8 @@ def _save_state(state: dict) -> None:
 
 
 def _clipboard_text() -> str:
+    import subprocess
+
     result = subprocess.run(
         ["pbpaste"],
         capture_output=True,
@@ -39,14 +50,26 @@ def _clipboard_text() -> str:
     )
     if result.returncode != 0:
         return ""
-    return result.stdout.strip()
+    return result.stdout
 
 
-def _looks_like_url(value: str) -> bool:
-    return value.startswith("http://") or value.startswith("https://")
+def _set_clipboard_text(text: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["pbcopy"],
+        input=text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
-def _post_json(path: str, payload: dict) -> None:
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _post_json(path: str, payload: dict) -> dict:
     body = json.dumps(payload).encode("utf-8")
     req = request.Request(
         CONFIG.receiver_url.rstrip("/") + path,
@@ -57,11 +80,11 @@ def _post_json(path: str, payload: dict) -> None:
             "Content-Type": "application/json",
         },
     )
-    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds):
-        return
+    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
-def _post_file(file_path: Path) -> None:
+def _post_file(file_path: Path) -> dict:
     req = request.Request(
         CONFIG.receiver_url.rstrip("/") + "/api/file",
         data=file_path.read_bytes(),
@@ -72,39 +95,115 @@ def _post_file(file_path: Path) -> None:
             "X-Filename": file_path.name,
         },
     )
-    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds):
+    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _sync_clipboard_push(state: dict) -> None:
+    if not clipboard_send_enabled(CONFIG.clipboard_mode):
         return
 
-
-def _file_digest(file_path: Path) -> str:
-    return file_sha256(file_path)
-
-
-def _sync_clipboard_url(state: dict) -> None:
     current = _clipboard_text()
-    if not current or current == state.get("last_clipboard"):
+    if not current or len(current) > CONFIG.max_clipboard_chars:
         return
 
-    state["last_clipboard"] = current
-    if not _looks_like_url(current):
+    digest = _hash_text(current)
+    if digest == state.get("last_local_clipboard_hash"):
         return
 
-    _post_json("/api/link", {"url": current, "source": "mac-clipboard"})
+    state["last_local_clipboard_hash"] = digest
+    if digest == state.get("last_remote_applied_hash"):
+        return
+
+    _post_json("/api/clipboard", {"text": current, "source": "mac-local"})
+    print("Clipboard Mac -> Linux")
 
 
-def _sync_files(state: dict) -> None:
+def _pull_remote_clipboard(state: dict) -> None:
+    if not clipboard_pull_enabled(CONFIG.clipboard_mode):
+        return
+
+    payload = _fetch_json("/api/clipboard")
+    remote_text = payload.get("text", "")
+    if not isinstance(remote_text, str) or not remote_text:
+        return
+    if len(remote_text) > CONFIG.max_clipboard_chars:
+        return
+
+    remote_hash = payload.get("hash")
+    if not isinstance(remote_hash, str) or not remote_hash:
+        remote_hash = _hash_text(remote_text)
+
+    if remote_hash == state.get("last_remote_clipboard_hash"):
+        return
+    state["last_remote_clipboard_hash"] = remote_hash
+
+    if remote_hash == state.get("last_local_clipboard_hash"):
+        return
+
+    _set_clipboard_text(remote_text)
+    state["last_local_clipboard_hash"] = remote_hash
+    state["last_remote_applied_hash"] = remote_hash
+    print("Clipboard Linux -> Mac")
+
+
+def _sync_drop_files(state: dict) -> None:
     tracked = state.setdefault("files", {})
-    for file_path in sorted(CONFIG.sync_dir.iterdir()):
+    pending = state.setdefault("drop_pending", {})
+    max_bytes = CONFIG.max_file_mb * 1024 * 1024
+
+    now = time.time()
+    existing_names = set()
+    for file_path in sorted(CONFIG.drop_dir.iterdir()):
         if not file_path.is_file():
             continue
 
-        digest = _file_digest(file_path)
-        previous = tracked.get(file_path.name)
-        if previous == digest:
+        existing_names.add(file_path.name)
+        stat = file_path.stat()
+        size = stat.st_size
+        mtime = stat.st_mtime
+
+        if size > max_bytes:
+            state["last_upload_result"] = f"skipped {file_path.name}: exceeds max_file_mb={CONFIG.max_file_mb}"
+            pending.pop(file_path.name, None)
             continue
 
-        _post_file(file_path)
+        previous = pending.get(file_path.name)
+        if not previous or previous.get("size") != size or previous.get("mtime") != mtime:
+            pending[file_path.name] = {"size": size, "mtime": mtime, "stable_checks": 0}
+            continue
+
+        previous["stable_checks"] = int(previous.get("stable_checks", 0)) + 1
+        if previous["stable_checks"] < 1:
+            continue
+
+        if now - mtime < 1:
+            continue
+
+        digest = file_sha256(file_path)
+        if tracked.get(file_path.name) == digest:
+            continue
+
+        response = _post_file(file_path)
         tracked[file_path.name] = digest
+        pending.pop(file_path.name, None)
+
+        remote_path = response.get("path", "")
+        state["last_upload_result"] = (
+            f"uploaded {file_path.name} ({size} bytes) at {datetime.now().isoformat(timespec='seconds')}"
+        )
+        print(f"Uploaded to Linux inbox: {file_path.name} -> {remote_path}")
+
+        if CONFIG.delete_after_send:
+            file_path.unlink(missing_ok=True)
+            state["last_upload_result"] += " (deleted local file)"
+
+    stale_names = [name for name in pending if name not in existing_names]
+    for name in stale_names:
+        pending.pop(name, None)
+    stale_tracked = [name for name in tracked if name not in existing_names]
+    for name in stale_tracked:
+        tracked.pop(name, None)
 
 
 def _fetch_json(path: str) -> dict:
@@ -158,11 +257,17 @@ def _sync_obsidian_vault(state: dict) -> None:
         for entry in build_manifest(CONFIG.obsidian_vault_dir, CONFIG)
     }
     remote_manifest = _fetch_json("/api/vault/manifest")
-    remote_entries = {entry["path"]: entry for entry in remote_manifest.get("files", [])}
+    remote_entries = {
+        entry["path"]: entry
+        for entry in remote_manifest.get("files", [])
+        if not should_skip_relative(entry["path"], CONFIG)
+    }
     known = state.setdefault("vault", {})
 
     all_paths = sorted(set(local_entries) | set(remote_entries))
     for relative_path in all_paths:
+        if should_skip_relative(relative_path, CONFIG):
+            continue
         local = local_entries.get(relative_path)
         remote = remote_entries.get(relative_path)
 
@@ -215,11 +320,12 @@ def main() -> None:
 
     while True:
         try:
-            _sync_clipboard_url(state)
+            _sync_clipboard_push(state)
+            _pull_remote_clipboard(state)
 
             now = time.time()
             if now - last_file_scan >= CONFIG.file_poll_seconds:
-                _sync_files(state)
+                _sync_drop_files(state)
                 last_file_scan = now
 
             if CONFIG.obsidian_enabled and now - last_vault_scan >= CONFIG.obsidian_poll_seconds:

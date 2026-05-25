@@ -1,18 +1,35 @@
 {
   "auth_token": "replace-with-a-long-random-string",
-  "listen_host": "0.0.0.0",
-  "port": 8765,
-  "receiver_url": "http://100.100.100.100:8765",
-  "inbox_dir": "~/UnixDrop/inbox",
-  "sync_dir": "~/UnixDrop/outbox",
-  "link_log_path": "~/UnixDrop/link-log.jsonl",
+  "receiver": {
+    "host": "100.100.100.100",
+    "port": 8765,
+    "listen_host": "0.0.0.0",
+    "auto_open_links": true,
+    "linux_inbox": "~/Inbox/MacDrop"
+  },
+  "clipboard": {
+    "mode": "two_way",
+    "max_chars": 20000
+  },
+  "drop": {
+    "folder": "~/Drop to ThinkPad",
+    "delete_after_send": false,
+    "max_file_mb": 500
+  },
+  "tabs": {
+    "default_browser": "auto"
+  },
+  "link_log_path": "~/Inbox/MacDrop/link-log.jsonl",
   "state_dir": "~/.local/state/unixdrop",
-  "auto_open_links": true,
   "clipboard_poll_seconds": 2,
   "file_poll_seconds": 5,
   "request_timeout_seconds": 15,
-  "obsidian_enabled": false,
-  "obsidian_vault_dir": "~/Obsidian/MainVault",
+  "obsidian": {
+    "enabled": true,
+    "local_vault": "~/Obsidian/MainVault",
+    "remote_vault": "~/Obsidian/MainVault",
+    "conflict_strategy": "copy"
+  },
   "obsidian_poll_seconds": 10,
   "obsidian_excludes": [
     ".obsidian/workspace.json",

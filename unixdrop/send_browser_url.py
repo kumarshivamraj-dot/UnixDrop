@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 from urllib import request
+from urllib.parse import urlparse
 
 from unixdrop.config import load_config
 
@@ -10,47 +12,128 @@ from unixdrop.config import load_config
 CONFIG = load_config()
 
 
-APPLE_SCRIPT = r'''
-tell application "System Events"
-    set frontApp to name of first application process whose frontmost is true
-end tell
+BROWSER_ALIASES = {
+    "safari": "Safari",
+    "chrome": "Google Chrome",
+    "arc": "Arc",
+    "brave": "Brave Browser",
+    "chromium": "Chromium",
+    "edge": "Microsoft Edge",
+    "vivaldi": "Vivaldi",
+    "opera": "Opera",
+}
 
-if frontApp is "Safari" then
-    tell application "Safari"
-        return URL of front document
-    end tell
-end if
-
-if frontApp is "Google Chrome" then
-    tell application "Google Chrome"
-        return URL of active tab of front window
-    end tell
-end if
-
-if frontApp is "Arc" then
-    tell application "Arc"
-        return URL of active tab of front window
-    end tell
-end if
-
-return ""
-'''
+BROWSER_APP_NAMES = [
+    "Safari",
+    "Google Chrome",
+    "Arc",
+    "Brave Browser",
+    "Chromium",
+    "Microsoft Edge",
+    "Vivaldi",
+    "Opera",
+]
 
 
-def current_browser_url() -> str:
+def _run_osascript(script: str) -> str:
     result = subprocess.run(
-        ["osascript", "-e", APPLE_SCRIPT],
+        ["osascript"],
+        input=script,
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        raise SystemExit(result.stderr.strip() or "could not read active browser url")
+        raise SystemExit(result.stderr.strip() or "could not read browser url")
     return result.stdout.strip()
 
 
-def send_url(url: str) -> None:
-    body = json.dumps({"url": url, "source": "mac-browser-helper"}).encode("utf-8")
+def _is_running(app_name: str) -> bool:
+    script = f'''
+tell application "System Events"
+    return exists application process "{app_name}"
+end tell
+'''
+    return _run_osascript(script).lower() == "true"
+
+
+def _read_safari_url() -> str:
+    script = r'''
+tell application "Safari"
+    if (count of windows) is 0 then return ""
+    try
+        return URL of current tab of front window
+    on error
+        try
+            return URL of front document
+        on error
+            return ""
+        end try
+    end try
+end tell
+'''
+    return _run_osascript(script)
+
+
+def _read_chromium_url(app_name: str) -> str:
+    script = f'''
+tell application "{app_name}"
+    if (count of windows) is 0 then return ""
+    try
+        return URL of active tab of front window
+    on error
+        return ""
+    end try
+end tell
+'''
+    return _run_osascript(script)
+
+
+def _resolve_browser_arg(browser: str | None) -> str | None:
+    if not browser or browser == "auto":
+        return None
+
+    normalized = browser.strip().lower()
+    if normalized in BROWSER_ALIASES:
+        return BROWSER_ALIASES[normalized]
+
+    for app_name in BROWSER_APP_NAMES:
+        if app_name.lower() == normalized:
+            return app_name
+
+    supported = ", ".join(sorted(BROWSER_ALIASES))
+    raise SystemExit(f"unsupported browser '{browser}'. Supported: {supported}, auto")
+
+
+def current_browser_context(browser: str | None = None) -> tuple[str, str]:
+    selected = _resolve_browser_arg(browser)
+    app_names = [selected] if selected else BROWSER_APP_NAMES
+
+    for app_name in app_names:
+        if app_name is None:
+            continue
+        try:
+            if not _is_running(app_name):
+                continue
+            if app_name == "Safari":
+                url = _read_safari_url()
+            else:
+                url = _read_chromium_url(app_name)
+            if url:
+                return app_name, url
+        except SystemExit:
+            continue
+
+    return "", ""
+
+
+def is_supported_web_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def send_url(url: str, no_open: bool = False) -> None:
+    body = json.dumps({"url": url, "source": "mac-browser-helper", "no_open": no_open}).encode("utf-8")
     req = request.Request(
         CONFIG.receiver_url.rstrip("/") + "/api/link",
         data=body,
@@ -64,11 +147,19 @@ def send_url(url: str) -> None:
         return
 
 
-def main() -> None:
-    url = current_browser_url()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Send active macOS browser tab to Linux receiver")
+    parser.add_argument("--browser", default="auto", help="auto, safari, chrome, arc, brave, chromium, edge, vivaldi, opera")
+    parser.add_argument("--no-open", action="store_true", help="queue link on Linux instead of opening immediately")
+    args = parser.parse_args(argv)
+
+    app_name, url = current_browser_context(args.browser)
     if not url:
-        raise SystemExit("no active browser url found")
-    send_url(url)
+        raise SystemExit("no active browser url found in supported running browsers")
+    if not is_supported_web_url(url):
+        label = app_name or "browser"
+        raise SystemExit(f"{label} returned a non-web URL: {url}")
+    send_url(url, no_open=args.no_open)
     print(url)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request
@@ -33,16 +34,16 @@ def _fetch_json(path: str) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _check_health() -> tuple[bool, str]:
+def _check_health() -> tuple[bool, dict, str]:
     try:
         req = request.Request(CONFIG.receiver_url.rstrip("/") + "/health")
         with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return bool(payload.get("ok")), "reachable"
+        return bool(payload.get("ok")), payload, "reachable"
     except URLError as exc:
-        return False, str(exc.reason)
+        return False, {}, str(exc.reason)
     except Exception as exc:
-        return False, str(exc)
+        return False, {}, str(exc)
 
 
 def _format_age(timestamp: float | None) -> str:
@@ -58,17 +59,36 @@ def _format_age(timestamp: float | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
+def _check_mac_agent() -> bool:
+    try:
+        result = subprocess.run(
+            ["launchctl", "list", "com.unixdrop.agent"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0
+
+
+def _pending_drop_files() -> int:
+    if not CONFIG.drop_dir.exists():
+        return 0
+    return sum(1 for path in CONFIG.drop_dir.iterdir() if path.is_file())
+
+
 def _vault_status(state: dict) -> list[str]:
     if not CONFIG.obsidian_enabled:
-        return ["vault: disabled"]
+        return ["obsidian sync enabled: false"]
 
     local_entries = {entry.path: entry for entry in build_manifest(CONFIG.obsidian_vault_dir, CONFIG)}
     try:
         remote_manifest = _fetch_json("/api/vault/manifest")
     except Exception as exc:
         return [
-            f"vault: local={len(local_entries)} remote=unknown",
-            f"vault error: {exc}",
+            "obsidian sync enabled: true",
+            f"vault drift: unknown ({exc})",
         ]
 
     remote_entries = {entry["path"]: entry for entry in remote_manifest.get("files", [])}
@@ -81,19 +101,14 @@ def _vault_status(state: dict) -> list[str]:
     )
 
     lines = [
-        f"vault: local={len(local_entries)} remote={len(remote_entries)} mismatched={len(mismatched)} local_only={len(only_local)} remote_only={len(only_remote)}"
+        "obsidian sync enabled: true",
+        (
+            "vault drift: "
+            f"mismatched={len(mismatched)} local_only={len(only_local)} remote_only={len(only_remote)}"
+        ),
     ]
 
-    if mismatched:
-        lines.append("mismatch sample: " + ", ".join(mismatched[:5]))
-    if only_local:
-        lines.append("local-only sample: " + ", ".join(only_local[:5]))
-    if only_remote:
-        lines.append("remote-only sample: " + ", ".join(only_remote[:5]))
-
-    last_sync_epoch = None
-    if STATE_FILE.exists():
-        last_sync_epoch = STATE_FILE.stat().st_mtime
+    last_sync_epoch = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else None
     lines.append(f"last state write: {_format_age(last_sync_epoch)}")
 
     known = state.get("vault", {})
@@ -101,23 +116,28 @@ def _vault_status(state: dict) -> list[str]:
     return lines
 
 
-def main() -> None:
+def status_lines() -> list[str]:
     state = _read_state()
-    ok, detail = _check_health()
+    receiver_ok, health_payload, detail = _check_health()
 
-    print("UnixDrop status")
-    print(f"receiver: {'ok' if ok else 'down'} ({detail})")
-    print(f"receiver_url: {CONFIG.receiver_url}")
-    print(f"obsidian_enabled: {CONFIG.obsidian_enabled}")
+    lines = ["Deskbridge status"]
+    lines.append(f"Mac agent running: {'yes' if _check_mac_agent() else 'no'}")
+    lines.append(f"Linux receiver reachable: {'yes' if receiver_ok else 'no'} ({detail})")
+    lines.append(f"Linux receiver version: {health_payload.get('version', 'unknown')}")
+    lines.append(f"auto_open_links: {health_payload.get('auto_open_links', CONFIG.auto_open_links)}")
+    lines.append(f"clipboard_mode: {health_payload.get('clipboard_mode', CONFIG.clipboard_mode)}")
+    lines.append(f"drop folder: {CONFIG.drop_dir}")
+    lines.append(f"Linux inbox: {CONFIG.inbox_dir}")
+    lines.append(f"pending files in drop folder: {_pending_drop_files()}")
+    lines.append(f"last upload result: {state.get('last_upload_result', 'none')}")
 
-    last_clipboard = state.get("last_clipboard", "")
-    if last_clipboard:
-        clipped = last_clipboard if len(last_clipboard) <= 100 else last_clipboard[:97] + "..."
-        print(f"last clipboard url: {clipped}")
-    else:
-        print("last clipboard url: none")
+    lines.extend(_vault_status(state))
+    lines.append("Mouse/keyboard sharing is external. Recommended: Input Leap or Barrier.")
+    return lines
 
-    for line in _vault_status(state):
+
+def main() -> None:
+    for line in status_lines():
         print(line)
 
 
