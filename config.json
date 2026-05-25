@@ -1,7 +1,7 @@
 {
-  "auth_token": "replace-with-a-long-random-string",
+  "auth_token": "long-random-string",
   "receiver": {
-    "host": "100.100.100.100",
+    "host": "100.76.14.117",
     "port": 8765,
     "listen_host": "0.0.0.0",
     "auto_open_links": true,
