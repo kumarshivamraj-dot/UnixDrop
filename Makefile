@@ -1,4 +1,7 @@
-.PHONY: status health tab tab-no-open tab-browser run-mac run-linux test migrate-config
+.PHONY: up status health tab tab-no-open tab-browser run-mac run-linux test migrate-config
+
+up:
+	./deskbridge up
 
 status:
 	./deskbridge status

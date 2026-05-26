@@ -55,6 +55,7 @@ launchctl load ~/Library/LaunchAgents/com.unixdrop.agent.plist
 Run from repo root:
 
 ```bash
+./deskbridge up
 ./deskbridge tab
 ./deskbridge tab --browser safari
 ./deskbridge tab --no-open
