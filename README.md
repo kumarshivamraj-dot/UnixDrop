@@ -7,7 +7,7 @@ The architecture stays simple:
 - **Mac Agent** pushes clipboard text, active browser tabs, and dropped files.
 - **Linux Receiver** accepts data over HTTP and stores/opens it.
 
-This project does **not** implement mouse/keyboard sharing. Use Input Leap or Barrier for HID.
+This project does **not** implement mouse/keyboard sharing directly. Use Deskflow (or another software KVM) for HID.
 
 ## Purpose
 
@@ -71,6 +71,74 @@ Compatibility wrappers:
 ./scripts/run_mac_agent.sh
 ./scripts/run_linux_receiver.sh
 ```
+
+## Install Deskflow (Free)
+
+Deskflow is free and open source.
+
+### macOS
+
+Recommended (Homebrew):
+
+```bash
+brew tap deskflow/tap
+brew install deskflow
+```
+
+Optional continuous build:
+
+```bash
+brew install deskflow-dev
+```
+
+If you downloaded `.app` from releases and macOS blocks launch:
+
+```bash
+xattr -c /Applications/Deskflow.app
+```
+
+### Linux
+
+Recommended fallback across distros (Flatpak):
+
+```bash
+flatpak install flathub org.deskflow.deskflow
+```
+
+You can also install distro-native packages or direct release assets from:
+
+- https://github.com/deskflow/deskflow/releases
+- https://flathub.org/apps/org.deskflow.deskflow
+
+## Deskflow Keyboard/Mouse Setup
+
+Use the included setup script on each machine:
+
+1. On the machine that owns the keyboard/mouse (server):
+
+```bash
+./scripts/configure_deskflow.sh --role server --client-name thinkpad --direction right --autostart
+```
+
+2. On the other machine (client):
+
+```bash
+./scripts/configure_deskflow.sh --role client --server-ip <server-ip> --autostart
+```
+
+Verify each side after setup:
+
+```bash
+./scripts/configure_deskflow.sh --role server --verify
+./scripts/configure_deskflow.sh --role client --server-ip <server-ip> --verify
+```
+
+Notes:
+
+- `--direction` is where the client is positioned relative to the server (`right|left|up|down`).
+- The script writes Deskflow files under `~/.config/deskflow`.
+- With `--autostart`, it installs either a user `systemd` service (Linux) or a LaunchAgent (macOS).
+- Ensure TCP `24800` is reachable from client to server.
 
 ## Clipboard Modes
 
@@ -176,13 +244,13 @@ Current behavior remains intentionally simple:
 - excludes cache/workspace paths
 - no delete propagation
 
-## Input Leap / Barrier
+## Software KVM
 
 Mouse/keyboard sharing is external to UnixDrop.
 
 Recommended setup:
 
-- install Input Leap or Barrier
+- install Deskflow (or Input Leap)
 - MacBook as server
 - ThinkPad as client
 - keep UnixDrop focused on clipboard/tab/file workflows
