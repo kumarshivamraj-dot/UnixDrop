@@ -28,6 +28,11 @@ CLIPBOARD_STATE = {
 CLIPBOARD_LOCK = threading.Lock()
 
 
+def _log(level: str, message: str) -> None:
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{stamp}] [unixdrop receiver] [{level}] {message}", flush=True)
+
+
 def _ensure_dirs() -> None:
     CONFIG.inbox_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.link_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,12 +63,19 @@ def _queue_link(url: str, source: str) -> None:
         handle.write(line)
 
 
-def _open_link(url: str) -> None:
-    subprocess.Popen(
-        ["xdg-open", url],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def _open_link(url: str) -> tuple[bool, str | None]:
+    command = shutil.which("xdg-open")
+    if not command:
+        return False, "xdg-open not found"
+    try:
+        subprocess.Popen(
+            [command, url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    return True, None
 
 
 def _utc_now_iso() -> str:
@@ -98,12 +110,15 @@ def _read_linux_clipboard() -> str | None:
     command = _clipboard_get_command()
     if not command:
         return None
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return None
     if result.returncode != 0:
         return None
     return result.stdout
@@ -113,13 +128,16 @@ def _write_linux_clipboard(text: str) -> bool:
     command = _clipboard_set_command()
     if not command:
         return False
-    result = subprocess.run(
-        command,
-        input=text,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            input=text,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except Exception:
+        return False
     return result.returncode == 0
 
 
@@ -142,6 +160,7 @@ def _linux_clipboard_watcher() -> None:
         return
 
     last_seen_hash = ""
+    last_error_log = 0.0
     while True:
         try:
             current = _read_linux_clipboard()
@@ -158,8 +177,11 @@ def _linux_clipboard_watcher() -> None:
             snapshot = _clipboard_snapshot()
             if digest != snapshot.get("hash"):
                 _update_clipboard_state(current, "linux-local")
-        except Exception:
-            pass
+        except Exception as exc:
+            now = time.monotonic()
+            if now - last_error_log >= 30:
+                _log("warn", f"clipboard watcher error: {exc}")
+                last_error_log = now
 
         time.sleep(CONFIG.clipboard_poll_seconds)
 
@@ -212,7 +234,48 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _read_body_bytes(self, *, max_bytes: int | None = None) -> tuple[bytes | None, str | None]:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None, "invalid content length"
+        if content_length <= 0:
+            return None, "missing request body"
+        if max_bytes is not None and content_length > max_bytes:
+            return None, "request body exceeds limit"
+        payload = self.rfile.read(content_length)
+        if len(payload) != content_length:
+            return None, "incomplete request body"
+        return payload, None
+
+    def _read_json_payload(self, *, max_bytes: int = 1024 * 1024) -> tuple[dict | None, str | None]:
+        raw, error = self._read_body_bytes(max_bytes=max_bytes)
+        if error:
+            return None, error
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, "invalid json payload"
+        if not isinstance(payload, dict):
+            return None, "json payload must be an object"
+        return payload, None
+
+    def _handle_internal_error(self, exc: Exception) -> None:
+        _log("error", f"{self.command} {self.path} failed: {exc}")
+        try:
+            self._reject(HTTPStatus.INTERNAL_SERVER_ERROR, "internal server error")
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def do_GET(self) -> None:
+        try:
+            self._dispatch_get()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            self._handle_internal_error(exc)
+
+    def _dispatch_get(self) -> None:
         parsed = urlparse(self.path)
 
         if parsed.path == "/health":
@@ -250,6 +313,14 @@ class UnixDropHandler(BaseHTTPRequestHandler):
         self._reject(HTTPStatus.NOT_FOUND, "not found")
 
     def do_POST(self) -> None:
+        try:
+            self._dispatch_post()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            self._handle_internal_error(exc)
+
+    def _dispatch_post(self) -> None:
         if self.path == "/api/ping":
             if not self._check_auth():
                 return
@@ -290,13 +361,11 @@ class UnixDropHandler(BaseHTTPRequestHandler):
         return True
 
     def _handle_link(self) -> None:
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self._reject(HTTPStatus.BAD_REQUEST, "invalid content length")
+        payload, error = self._read_json_payload(max_bytes=64 * 1024)
+        if error:
+            self._reject(HTTPStatus.BAD_REQUEST, error)
             return
 
-        payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
         url = payload.get("url", "").strip()
         source = payload.get("source", "unknown")
         no_open_requested = bool(payload.get("no_open", False))
@@ -305,43 +374,68 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.BAD_REQUEST, "invalid url")
             return
 
+        action = "queued"
+        open_error = None
+        if should_open_link(CONFIG.auto_open_links, no_open_requested):
+            opened, open_error = _open_link(url)
+            if opened:
+                action = "opened"
+            else:
+                _log("warn", f"failed to open link, queueing instead: {open_error}")
+                try:
+                    _queue_link(url, source)
+                except Exception as exc:
+                    self._reject(HTTPStatus.INTERNAL_SERVER_ERROR, f"failed to queue link: {exc}")
+                    return
+        else:
+            try:
+                _queue_link(url, source)
+            except Exception as exc:
+                self._reject(HTTPStatus.INTERNAL_SERVER_ERROR, f"failed to queue link: {exc}")
+                return
+
         event = {
             "type": "link",
             "url": url,
             "source": source,
             "received_at": _utc_now_iso(),
-            "opened": should_open_link(CONFIG.auto_open_links, no_open_requested),
+            "opened": action == "opened",
+            "action": action,
         }
-        _append_link_log(event)
+        if open_error:
+            event["open_error"] = open_error
+        try:
+            _append_link_log(event)
+        except Exception as exc:
+            _log("warn", f"failed to append link log: {exc}")
 
-        if should_open_link(CONFIG.auto_open_links, no_open_requested):
-            _open_link(url)
-            self._json_response(HTTPStatus.OK, {"ok": True, "action": "opened"})
-            return
-
-        _queue_link(url, source)
-        self._json_response(HTTPStatus.OK, {"ok": True, "action": "queued"})
+        self._json_response(HTTPStatus.OK, {"ok": True, "action": action})
 
     def _handle_file(self) -> None:
         file_name = self.headers.get("X-Filename", "").strip()
         if not file_name:
             self._reject(HTTPStatus.BAD_REQUEST, "missing filename")
             return
-
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self._reject(HTTPStatus.BAD_REQUEST, "invalid content length")
+        safe_name = Path(file_name).name
+        if not safe_name or safe_name in {".", ".."}:
+            self._reject(HTTPStatus.BAD_REQUEST, "invalid filename")
             return
 
         max_bytes = CONFIG.max_file_mb * 1024 * 1024
-        if content_length <= 0 or content_length > max_bytes:
-            self._reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "file exceeds max_file_mb")
+        data, error = self._read_body_bytes(max_bytes=max_bytes)
+        if error:
+            if error == "request body exceeds limit":
+                self._reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "file exceeds max_file_mb")
+            else:
+                self._reject(HTTPStatus.BAD_REQUEST, error)
             return
 
-        data = self.rfile.read(content_length)
-        destination = resolve_conflict_destination(CONFIG.inbox_dir, file_name)
-        destination.write_bytes(data)
+        destination = resolve_conflict_destination(CONFIG.inbox_dir, safe_name)
+        try:
+            destination.write_bytes(data)
+        except Exception as exc:
+            self._reject(HTTPStatus.INTERNAL_SERVER_ERROR, f"failed to write file: {exc}")
+            return
 
         event = {
             "type": "file",
@@ -349,7 +443,10 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             "size_bytes": len(data),
             "received_at": _utc_now_iso(),
         }
-        _append_link_log(event)
+        try:
+            _append_link_log(event)
+        except Exception as exc:
+            _log("warn", f"failed to append file event log: {exc}")
         self._json_response(HTTPStatus.OK, {"ok": True, "path": str(destination)})
 
     def _handle_vault_manifest(self) -> None:
@@ -395,7 +492,6 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            content_length = int(self.headers.get("Content-Length", "0"))
             mtime = float(self.headers.get("X-File-Mtime", "0"))
         except ValueError:
             self._reject(HTTPStatus.BAD_REQUEST, "invalid file metadata")
@@ -406,7 +502,10 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.BAD_REQUEST, "invalid vault path")
             return
 
-        data = self.rfile.read(content_length)
+        data, error = self._read_body_bytes()
+        if error:
+            self._reject(HTTPStatus.BAD_REQUEST, error)
+            return
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
         if mtime > 0:
@@ -429,13 +528,10 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.NOT_FOUND, "clipboard push disabled by clipboard_mode")
             return
 
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            self._reject(HTTPStatus.BAD_REQUEST, "invalid content length")
+        payload, error = self._read_json_payload(max_bytes=2 * 1024 * 1024)
+        if error:
+            self._reject(HTTPStatus.BAD_REQUEST, error)
             return
-
-        payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
         text = payload.get("text", "")
         source = payload.get("source", "unknown")
         if not isinstance(text, str):
@@ -471,8 +567,12 @@ def main() -> None:
     _ensure_dirs()
     watcher = threading.Thread(target=_linux_clipboard_watcher, daemon=True)
     watcher.start()
-    server = ThreadingHTTPServer((CONFIG.listen_host, CONFIG.port), UnixDropHandler)
-    print(f"UnixDrop receiver listening on {CONFIG.listen_host}:{CONFIG.port}")
+    try:
+        server = ThreadingHTTPServer((CONFIG.listen_host, CONFIG.port), UnixDropHandler)
+    except Exception as exc:
+        _log("error", f"failed to start receiver on {CONFIG.listen_host}:{CONFIG.port}: {exc}")
+        raise
+    _log("info", f"listening on {CONFIG.listen_host}:{CONFIG.port}")
     server.serve_forever()
 
 
