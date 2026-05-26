@@ -166,6 +166,15 @@ EOF
   chmod +x "${path}"
 }
 
+sync_macos_core_server_config() {
+  local server_config_file="$1"
+  local fallback_dir="${HOME}/Library/Deskflow"
+  local fallback_file="${fallback_dir}/deskflow-server.conf"
+  mkdir -p "${fallback_dir}"
+  cp "${server_config_file}" "${fallback_file}"
+  log "synced macOS core fallback config: ${fallback_file}"
+}
+
 install_linux_autostart() {
   local role="$1"
   local start_script="$2"
@@ -507,6 +516,9 @@ if [[ "${role}" == "server" ]]; then
   start_script="${config_dir}/start-deskflow-server.sh"
 
   write_server_config "${server_config_file}" "${server_name}" "${client_name}" "${direction}" "${reverse_direction}"
+  if [[ "${platform}" == "macos" && "${deskflow_server_mode}" == "server" ]]; then
+    sync_macos_core_server_config "${server_config_file}"
+  fi
   if [[ -n "${deskflow_server_mode}" ]]; then
     write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" ${deskflow_server_mode} --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
   else
