@@ -519,10 +519,18 @@ if [[ "${role}" == "server" ]]; then
   if [[ "${platform}" == "macos" && "${deskflow_server_mode}" == "server" ]]; then
     sync_macos_core_server_config "${server_config_file}"
   fi
+  server_start_body="$(cat <<EOF
+new_instance_flag=""
+if "${deskflow_server_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
+  new_instance_flag="--new-instance"
+fi
+exec "${deskflow_server_bin}" ${deskflow_server_mode} \${new_instance_flag} --no-daemon --name "${server_name}" --config "${server_config_file}"
+EOF
+)"
   if [[ -n "${deskflow_server_mode}" ]]; then
-    write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" ${deskflow_server_mode} --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
+    write_start_script "${start_script}" "${server_start_body}"
   else
-    write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
+    write_start_script "${start_script}" "${server_start_body}"
   fi
 
   log "server config written: ${server_config_file}"
@@ -554,10 +562,18 @@ fi
 [[ -n "${server_ip}" ]] || die "--server-ip is required for client role"
 client_start_script="${config_dir}/start-deskflow-client.sh"
 client_runtime_name="${client_name:-$(hostname 2>/dev/null || hostname -s)}"
+client_start_body="$(cat <<EOF
+new_instance_flag=""
+if "${deskflow_client_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
+  new_instance_flag="--new-instance"
+fi
+exec "${deskflow_client_bin}" ${deskflow_client_mode} \${new_instance_flag} --no-daemon --name "${client_runtime_name}" "${server_ip}"
+EOF
+)"
 if [[ -n "${deskflow_client_mode}" ]]; then
-  write_start_script "${client_start_script}" "exec \"${deskflow_client_bin}\" ${deskflow_client_mode} --no-daemon --name \"${client_runtime_name}\" \"${server_ip}\""
+  write_start_script "${client_start_script}" "${client_start_body}"
 else
-  write_start_script "${client_start_script}" "exec \"${deskflow_client_bin}\" --no-daemon --name \"${client_runtime_name}\" \"${server_ip}\""
+  write_start_script "${client_start_script}" "${client_start_body}"
 fi
 log "client launcher written: ${client_start_script}"
 log "start command: ${client_start_script}"
