@@ -26,6 +26,8 @@ CLIPBOARD_STATE = {
     "updated_at": "",
 }
 CLIPBOARD_LOCK = threading.Lock()
+DESKFLOW_PROCESS: subprocess.Popen[str] | None = None
+DESKFLOW_LOCK = threading.Lock()
 
 
 def _log(level: str, message: str) -> None:
@@ -210,6 +212,49 @@ def _inbox_writable() -> bool:
 
 def _xdg_open_available() -> bool:
     return shutil.which("xdg-open") is not None
+
+
+def _start_deskflow_process() -> subprocess.Popen[str] | None:
+    script = CONFIG.deskflow_linux_start_script
+    if not CONFIG.deskflow_enabled:
+        return None
+    if not script.exists():
+        _log("warn", f"deskflow integration enabled but script not found: {script}")
+        return None
+    if not os.access(script, os.X_OK):
+        _log("warn", f"deskflow integration enabled but script not executable: {script}")
+        return None
+    try:
+        proc = subprocess.Popen([str(script)])
+        _log("info", f"deskflow start requested via unixdrop receiver: {script} (pid={proc.pid})")
+        return proc
+    except Exception as exc:
+        _log("error", f"failed to start deskflow from receiver: {exc}")
+        return None
+
+
+def _ensure_deskflow_running() -> None:
+    global DESKFLOW_PROCESS
+    if not CONFIG.deskflow_enabled:
+        return
+    with DESKFLOW_LOCK:
+        if DESKFLOW_PROCESS is None:
+            DESKFLOW_PROCESS = _start_deskflow_process()
+            return
+        return_code = DESKFLOW_PROCESS.poll()
+        if return_code is None:
+            return
+        _log("warn", f"deskflow process exited with code {return_code}, restarting")
+        DESKFLOW_PROCESS = _start_deskflow_process()
+
+
+def _deskflow_supervisor() -> None:
+    while True:
+        try:
+            _ensure_deskflow_running()
+        except Exception as exc:
+            _log("error", f"deskflow supervisor error: {exc}")
+        time.sleep(10)
 
 
 class UnixDropHandler(BaseHTTPRequestHandler):
@@ -565,6 +610,9 @@ class UnixDropHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     _ensure_dirs()
+    _ensure_deskflow_running()
+    deskflow_thread = threading.Thread(target=_deskflow_supervisor, daemon=True)
+    deskflow_thread.start()
     watcher = threading.Thread(target=_linux_clipboard_watcher, daemon=True)
     watcher.start()
     try:

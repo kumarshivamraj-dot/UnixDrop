@@ -16,7 +16,8 @@ Server role options:
   --server-name NAME           Server screen name (default: local hostname)
 
 Client role options:
-  --server-ip IP               Server IP or hostname to connect to
+  --server-ip IP               Server endpoint (host or host:port)
+  --server-hosts LIST          Comma-separated endpoints. Order matters.
   --client-name NAME           Client runtime screen name override (default: local hostname)
 
 Shared options:
@@ -28,6 +29,7 @@ Shared options:
 Examples:
   ./scripts/configure_deskflow.sh --role server --client-name thinkpad --direction right --autostart
   ./scripts/configure_deskflow.sh --role client --server-ip 192.168.1.50 --autostart
+  ./scripts/configure_deskflow.sh --role client --server-hosts 192.168.1.50:24800,100.64.0.12:24800 --autostart
   ./scripts/configure_deskflow.sh --role server --verify
 EOF
 }
@@ -293,6 +295,34 @@ split_server_endpoint() {
   printf '%s %s\n' "${host}" "${port}"
 }
 
+first_reachable_endpoint_from_csv() {
+  local endpoints_csv="$1"
+  local first_endpoint=""
+  local raw=""
+  local endpoint=""
+  local host=""
+  local port=""
+  IFS=',' read -r -a endpoints <<< "${endpoints_csv}"
+  for raw in "${endpoints[@]}"; do
+    endpoint="${raw#"${raw%%[![:space:]]*}"}"
+    endpoint="${endpoint%"${endpoint##*[![:space:]]}"}"
+    [[ -n "${endpoint}" ]] || continue
+    if [[ -z "${first_endpoint}" ]]; then
+      first_endpoint="${endpoint}"
+    fi
+    read -r host port <<<"$(split_server_endpoint "${endpoint}")"
+    if tcp_reachable "${host}" "${port}"; then
+      printf '%s\n' "${endpoint}"
+      return 0
+    fi
+  done
+  if [[ -n "${first_endpoint}" ]]; then
+    printf '%s\n' "${first_endpoint}"
+    return 0
+  fi
+  return 1
+}
+
 extract_client_server_ip() {
   local start_script="$1"
   if [[ ! -f "${start_script}" ]]; then
@@ -387,11 +417,19 @@ verify_client_setup() {
   fi
 
   if [[ -n "${server_ip_resolved}" ]]; then
-    read -r server_host server_port <<<"$(split_server_endpoint "${server_ip_resolved}")"
-    if tcp_reachable "${server_host}" "${server_port}"; then
-      check_result "true" "server reachable on tcp/${server_port}" "${server_host}"
+    selected_endpoint="$(first_reachable_endpoint_from_csv "${server_ip_resolved}" || true)"
+    if [[ -z "${selected_endpoint}" ]]; then
+      check_result "false" "server endpoint parsed" "invalid endpoint list"
     else
-      check_result "false" "server reachable on tcp/${server_port}" "${server_host}"
+      read -r server_host server_port <<<"$(split_server_endpoint "${selected_endpoint}")"
+      if tcp_reachable "${server_host}" "${server_port}"; then
+        check_result "true" "server reachable on tcp/${server_port}" "${server_host}"
+      else
+        check_result "false" "server reachable on tcp/${server_port}" "${server_host}"
+      fi
+      if [[ "${server_ip_resolved}" == *,* ]]; then
+        check_result "true" "endpoint selection policy" "prefer first reachable from: ${server_ip_resolved}"
+      fi
     fi
   fi
 
@@ -406,6 +444,7 @@ verify_client_setup() {
 
 role=""
 server_ip=""
+server_hosts=""
 server_name="$(hostname 2>/dev/null || hostname -s)"
 client_name=""
 direction="right"
@@ -422,6 +461,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --server-ip)
       server_ip="${2:-}"
+      shift 2
+      ;;
+    --server-hosts)
+      server_hosts="${2:-}"
       shift 2
       ;;
     --server-name)
@@ -460,6 +503,9 @@ done
 
 [[ -n "${role}" ]] || die "--role is required"
 [[ "${role}" == "server" || "${role}" == "client" ]] || die "--role must be server or client"
+if [[ -n "${server_hosts}" ]]; then
+  server_ip="${server_hosts}"
+fi
 
 case "${direction}" in
   right|left|up|down) ;;
@@ -567,7 +613,64 @@ new_instance_flag=""
 if "${deskflow_client_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
   new_instance_flag="--new-instance"
 fi
-exec "${deskflow_client_bin}" ${deskflow_client_mode} \${new_instance_flag} --no-daemon --name "${client_runtime_name}" "${server_ip}"
+server_candidates_csv="${server_ip}"
+
+split_server_endpoint_runtime() {
+  local value="\$1"
+  local host="\$value"
+  local port="24800"
+  if [[ "\$value" == *:* ]]; then
+    host="\${value%:*}"
+    port="\${value##*:}"
+  fi
+  printf '%s %s\n' "\${host}" "\${port}"
+}
+
+tcp_reachable_runtime() {
+  local host="\$1"
+  local port="\$2"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 "\${host}" "\${port}" >/dev/null 2>&1
+    return \$?
+  fi
+  return 2
+}
+
+first_reachable_endpoint_runtime() {
+  local endpoints_csv="\$1"
+  local first_endpoint=""
+  local raw=""
+  local endpoint=""
+  local host=""
+  local port=""
+  IFS=',' read -r -a endpoints <<< "\${endpoints_csv}"
+  for raw in "\${endpoints[@]}"; do
+    endpoint="\${raw#"\${raw%%[![:space:]]*}"}"
+    endpoint="\${endpoint%"\${endpoint##*[![:space:]]}"}"
+    [[ -n "\${endpoint}" ]] || continue
+    if [[ -z "\${first_endpoint}" ]]; then
+      first_endpoint="\${endpoint}"
+    fi
+    read -r host port <<<"\$(split_server_endpoint_runtime "\${endpoint}")"
+    if tcp_reachable_runtime "\${host}" "\${port}"; then
+      printf '%s\n' "\${endpoint}"
+      return 0
+    fi
+  done
+  if [[ -n "\${first_endpoint}" ]]; then
+    printf '%s\n' "\${first_endpoint}"
+    return 0
+  fi
+  return 1
+}
+
+selected_server="\$(first_reachable_endpoint_runtime "\${server_candidates_csv}" || true)"
+if [[ -z "\${selected_server}" ]]; then
+  echo "No server address configured (empty endpoint list)" >&2
+  exit 1
+fi
+
+exec "${deskflow_client_bin}" ${deskflow_client_mode} \${new_instance_flag} --no-daemon --name "${client_runtime_name}" "\${selected_server}"
 EOF
 )"
 if [[ -n "${deskflow_client_mode}" ]]; then

@@ -5,6 +5,7 @@ import argparse
 from unixdrop.health import health_lines
 from unixdrop.send_browser_url import current_browser_context, is_supported_web_url, send_url
 from unixdrop.status import status_lines
+from unixdrop.tui import run_tui
 
 
 def _cmd_tab(args: argparse.Namespace) -> int:
@@ -31,6 +32,10 @@ def _cmd_health(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tui(args: argparse.Namespace) -> int:
+    return run_tui(interval_seconds=args.interval, once=args.once)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deskbridge", description="Desk bridge between macOS and Linux")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -49,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     health_parser = subparsers.add_parser("health", help="Run health checks")
     health_parser.set_defaults(func=_cmd_health)
+
+    tui_parser = subparsers.add_parser("tui", help="Live terminal dashboard")
+    tui_parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval in seconds")
+    tui_parser.add_argument("--once", action="store_true", help="Render one snapshot and exit")
+    tui_parser.set_defaults(func=_cmd_tui)
 
     return parser
 

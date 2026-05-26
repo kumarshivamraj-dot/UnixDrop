@@ -58,6 +58,23 @@ class ConfigTests(unittest.TestCase):
         cfg = load_config(config_path)
         self.assertTrue(str(cfg.drop_dir).endswith("LegacyDrop"))
 
+    def test_deskflow_nested_keys_map_to_flat_fields(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "http://127.0.0.1:8765",
+                "deskflow": {
+                    "enabled": True,
+                    "mac_start_script": "~/custom/start-mac.sh",
+                    "linux_start_script": "~/custom/start-linux.sh",
+                },
+            }
+        )
+        cfg = load_config(config_path)
+        self.assertTrue(cfg.deskflow_enabled)
+        self.assertTrue(str(cfg.deskflow_mac_start_script).endswith("custom/start-mac.sh"))
+        self.assertTrue(str(cfg.deskflow_linux_start_script).endswith("custom/start-linux.sh"))
+
 
 if __name__ == "__main__":
     unittest.main()

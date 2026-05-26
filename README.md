@@ -60,6 +60,7 @@ Run from repo root:
 ./deskbridge tab --no-open
 ./deskbridge status
 ./deskbridge health
+./deskbridge tui
 ```
 
 Compatibility wrappers:
@@ -126,6 +127,12 @@ Use the included setup script on each machine:
 ./scripts/configure_deskflow.sh --role client --server-ip <server-ip> --autostart
 ```
 
+Prefer LAN first, Tailscale fallback:
+
+```bash
+./scripts/configure_deskflow.sh --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --autostart
+```
+
 Verify each side after setup:
 
 ```bash
@@ -136,9 +143,27 @@ Verify each side after setup:
 Notes:
 
 - `--direction` is where the client is positioned relative to the server (`right|left|up|down`).
+- `--server-hosts` accepts a comma-separated endpoint list and picks the first reachable endpoint at startup.
 - The script writes Deskflow files under `~/.config/deskflow`.
 - With `--autostart`, it installs either a user `systemd` service (Linux) or a LaunchAgent (macOS).
 - Ensure TCP `24800` is reachable from client to server.
+
+### Integrate Deskflow Into UnixDrop Services
+
+If you want `launchctl`/`systemctl` for UnixDrop to also manage Deskflow startup, set this in each machine's UnixDrop config:
+
+```json
+"deskflow": {
+  "enabled": true,
+  "mac_start_script": "~/.config/deskflow/start-deskflow-server.sh",
+  "linux_start_script": "~/.config/deskflow/start-deskflow-client.sh"
+}
+```
+
+Behavior:
+
+- macOS `unixdrop.mac_agent` starts and supervises `mac_start_script`.
+- Linux `unixdrop.linux_service` starts and supervises `linux_start_script`.
 
 ## Clipboard Modes
 

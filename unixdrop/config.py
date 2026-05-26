@@ -44,6 +44,9 @@ class AppConfig:
     obsidian_conflict_strategy: str = "copy"
     obsidian_poll_seconds: int = 10
     obsidian_excludes: list[str] | None = None
+    deskflow_enabled: bool = False
+    deskflow_mac_start_script: Path = Path("~/.config/deskflow/start-deskflow-server.sh").expanduser()
+    deskflow_linux_start_script: Path = Path("~/.config/deskflow/start-deskflow-client.sh").expanduser()
 
 
 def parse_clipboard_mode(mode: str) -> str:
@@ -66,6 +69,7 @@ def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
     drop = raw.get("drop") if isinstance(raw.get("drop"), dict) else {}
     tabs = raw.get("tabs") if isinstance(raw.get("tabs"), dict) else {}
     obsidian = raw.get("obsidian") if isinstance(raw.get("obsidian"), dict) else {}
+    deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
 
     if "host" in receiver and "receiver_url" not in flat:
         host = str(receiver.get("host", "127.0.0.1")).strip()
@@ -104,6 +108,13 @@ def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
     if "conflict_strategy" in obsidian and "obsidian_conflict_strategy" not in flat:
         flat["obsidian_conflict_strategy"] = obsidian["conflict_strategy"]
 
+    if "enabled" in deskflow and "deskflow_enabled" not in flat:
+        flat["deskflow_enabled"] = deskflow["enabled"]
+    if "mac_start_script" in deskflow and "deskflow_mac_start_script" not in flat:
+        flat["deskflow_mac_start_script"] = deskflow["mac_start_script"]
+    if "linux_start_script" in deskflow and "deskflow_linux_start_script" not in flat:
+        flat["deskflow_linux_start_script"] = deskflow["linux_start_script"]
+
     if "shared_clipboard_enabled" in raw or "clipboard_sync_enabled" in raw:
         warnings.append(
             "`shared_clipboard_enabled` and `clipboard_sync_enabled` are deprecated; use `clipboard_mode`."
@@ -132,6 +143,12 @@ def _apply_paths(raw: dict) -> dict:
     converted["link_log_path"] = Path(raw.get("link_log_path", "~/Inbox/MacDrop/link-log.jsonl")).expanduser()
     converted["state_dir"] = Path(raw.get("state_dir", "~/.local/state/unixdrop")).expanduser()
     converted["obsidian_vault_dir"] = Path(raw.get("obsidian_vault_dir", "~/Obsidian/MainVault")).expanduser()
+    converted["deskflow_mac_start_script"] = Path(
+        raw.get("deskflow_mac_start_script", "~/.config/deskflow/start-deskflow-server.sh")
+    ).expanduser()
+    converted["deskflow_linux_start_script"] = Path(
+        raw.get("deskflow_linux_start_script", "~/.config/deskflow/start-deskflow-client.sh")
+    ).expanduser()
     return converted
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,37 @@ STATE_FILE = CONFIG.state_dir / "mac_state.json"
 def _ensure_dirs() -> None:
     CONFIG.drop_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.state_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _start_deskflow_process() -> subprocess.Popen[str] | None:
+    if not CONFIG.deskflow_enabled:
+        return None
+    script = CONFIG.deskflow_mac_start_script
+    if not script.exists():
+        print(f"Deskflow integration enabled but script not found: {script}")
+        return None
+    if not os.access(script, os.X_OK):
+        print(f"Deskflow integration enabled but script not executable: {script}")
+        return None
+    try:
+        proc = subprocess.Popen([str(script)])
+        print(f"Deskflow start requested via UnixDrop mac agent: {script} (pid={proc.pid})")
+        return proc
+    except Exception as exc:
+        print(f"Failed to start Deskflow from mac agent: {exc}")
+        return None
+
+
+def _ensure_deskflow_running(process: subprocess.Popen[str] | None) -> subprocess.Popen[str] | None:
+    if not CONFIG.deskflow_enabled:
+        return None
+    if process is None:
+        return _start_deskflow_process()
+    return_code = process.poll()
+    if return_code is None:
+        return process
+    print(f"Deskflow process exited with code {return_code}, restarting")
+    return _start_deskflow_process()
 
 
 def _load_state() -> dict:
@@ -315,11 +347,13 @@ def _sync_obsidian_vault(state: dict) -> None:
 def main() -> None:
     _ensure_dirs()
     state = _load_state()
+    deskflow_process = _start_deskflow_process()
     last_file_scan = 0.0
     last_vault_scan = 0.0
 
     while True:
         try:
+            deskflow_process = _ensure_deskflow_running(deskflow_process)
             _sync_clipboard_push(state)
             _pull_remote_clipboard(state)
 
