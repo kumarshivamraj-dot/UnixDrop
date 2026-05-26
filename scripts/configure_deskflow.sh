@@ -95,6 +95,40 @@ find_deskflow_binary() {
   return 1
 }
 
+resolve_deskflow_command() {
+  local platform="$1"
+  local role="$2"
+  local bin=""
+  local mode=""
+  if [[ "${role}" == "server" ]]; then
+    bin="$(find_deskflow_binary "${platform}" "deskflow-server" || true)"
+    if [[ -n "${bin}" ]]; then
+      printf '%s\t%s\n' "${bin}" "${mode}"
+      return 0
+    fi
+    bin="$(find_deskflow_binary "${platform}" "deskflow-core" || true)"
+    if [[ -n "${bin}" ]]; then
+      mode="server"
+      printf '%s\t%s\n' "${bin}" "${mode}"
+      return 0
+    fi
+    return 1
+  fi
+
+  bin="$(find_deskflow_binary "${platform}" "deskflow-client" || true)"
+  if [[ -n "${bin}" ]]; then
+    printf '%s\t%s\n' "${bin}" "${mode}"
+    return 0
+  fi
+  bin="$(find_deskflow_binary "${platform}" "deskflow-core" || true)"
+  if [[ -n "${bin}" ]]; then
+    mode="client"
+    printf '%s\t%s\n' "${bin}" "${mode}"
+    return 0
+  fi
+  return 1
+}
+
 write_server_config() {
   local config_file="$1"
   local server_name="$2"
@@ -262,13 +296,18 @@ verify_server_setup() {
   local platform="$1"
   local config_dir="$2"
   local deskflow_server_path="${3:-}"
+  local deskflow_server_mode="${4:-}"
   local server_config_file="${config_dir}/deskflow-server.conf"
   local start_script="${config_dir}/start-deskflow-server.sh"
 
   if [[ -n "${deskflow_server_path}" ]]; then
-    check_result "true" "deskflow-server binary found" "${deskflow_server_path}"
+    if [[ -n "${deskflow_server_mode}" ]]; then
+      check_result "true" "deskflow server command found" "${deskflow_server_path} ${deskflow_server_mode}"
+    else
+      check_result "true" "deskflow server command found" "${deskflow_server_path}"
+    fi
   else
-    check_result "false" "deskflow-server binary found" "not found in PATH or /Applications"
+    check_result "false" "deskflow server command found" "not found in PATH or /Applications"
   fi
 
   [[ -f "${server_config_file}" ]] && check_result "true" "server config exists" "${server_config_file}" || check_result "false" "server config exists" "${server_config_file}"
@@ -311,14 +350,19 @@ verify_client_setup() {
   local platform="$1"
   local config_dir="$2"
   local deskflow_client_path="${3:-}"
-  local server_ip_input="$4"
+  local deskflow_client_mode="${4:-}"
+  local server_ip_input="$5"
   local start_script="${config_dir}/start-deskflow-client.sh"
   local server_ip_resolved="${server_ip_input}"
 
   if [[ -n "${deskflow_client_path}" ]]; then
-    check_result "true" "deskflow-client binary found" "${deskflow_client_path}"
+    if [[ -n "${deskflow_client_mode}" ]]; then
+      check_result "true" "deskflow client command found" "${deskflow_client_path} ${deskflow_client_mode}"
+    else
+      check_result "true" "deskflow client command found" "${deskflow_client_path}"
+    fi
   else
-    check_result "false" "deskflow-client binary found" "not found in PATH or /Applications"
+    check_result "false" "deskflow client command found" "not found in PATH or /Applications"
   fi
 
   [[ -x "${start_script}" ]] && check_result "true" "client start script executable" "${start_script}" || check_result "false" "client start script executable" "${start_script}"
@@ -416,26 +460,36 @@ esac
 platform="$(detect_platform)"
 deskflow_server_bin=""
 deskflow_client_bin=""
+deskflow_server_mode=""
+deskflow_client_mode=""
 if [[ "${verify_mode}" == "true" ]]; then
   if [[ "${role}" == "server" ]]; then
-    deskflow_server_bin="$(find_deskflow_binary "${platform}" "deskflow-server" || true)"
+    if read -r deskflow_server_bin deskflow_server_mode < <(resolve_deskflow_command "${platform}" "server"); then
+      :
+    fi
   else
-    deskflow_client_bin="$(find_deskflow_binary "${platform}" "deskflow-client" || true)"
+    if read -r deskflow_client_bin deskflow_client_mode < <(resolve_deskflow_command "${platform}" "client"); then
+      :
+    fi
   fi
 else
   if [[ "${role}" == "server" ]]; then
-    deskflow_server_bin="$(detect_deskflow_binary "${platform}" "deskflow-server")"
+    if ! read -r deskflow_server_bin deskflow_server_mode < <(resolve_deskflow_command "${platform}" "server"); then
+      die "deskflow server command not found. Install Deskflow first."
+    fi
   else
-    deskflow_client_bin="$(detect_deskflow_binary "${platform}" "deskflow-client")"
+    if ! read -r deskflow_client_bin deskflow_client_mode < <(resolve_deskflow_command "${platform}" "client"); then
+      die "deskflow client command not found. Install Deskflow first."
+    fi
   fi
 fi
 
 if [[ "${verify_mode}" == "true" ]]; then
   log "running verification for role=${role}"
   if [[ "${role}" == "server" ]]; then
-    verify_server_setup "${platform}" "${config_dir}" "${deskflow_server_bin}"
+    verify_server_setup "${platform}" "${config_dir}" "${deskflow_server_bin}" "${deskflow_server_mode}"
   else
-    verify_client_setup "${platform}" "${config_dir}" "${deskflow_client_bin}" "${server_ip}"
+    verify_client_setup "${platform}" "${config_dir}" "${deskflow_client_bin}" "${deskflow_client_mode}" "${server_ip}"
   fi
   if [[ "${VERIFY_FAILS}" -gt 0 ]]; then
     die "verification failed with ${VERIFY_FAILS} issue(s)"
@@ -453,7 +507,11 @@ if [[ "${role}" == "server" ]]; then
   start_script="${config_dir}/start-deskflow-server.sh"
 
   write_server_config "${server_config_file}" "${server_name}" "${client_name}" "${direction}" "${reverse_direction}"
-  write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
+  if [[ -n "${deskflow_server_mode}" ]]; then
+    write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" ${deskflow_server_mode} --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
+  else
+    write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
+  fi
 
   log "server config written: ${server_config_file}"
   log "start command: ${start_script}"
@@ -484,7 +542,11 @@ fi
 [[ -n "${server_ip}" ]] || die "--server-ip is required for client role"
 client_start_script="${config_dir}/start-deskflow-client.sh"
 client_runtime_name="${client_name:-$(hostname 2>/dev/null || hostname -s)}"
-write_start_script "${client_start_script}" "exec \"${deskflow_client_bin}\" --no-daemon --name \"${client_runtime_name}\" \"${server_ip}\""
+if [[ -n "${deskflow_client_mode}" ]]; then
+  write_start_script "${client_start_script}" "exec \"${deskflow_client_bin}\" ${deskflow_client_mode} --no-daemon --name \"${client_runtime_name}\" \"${server_ip}\""
+else
+  write_start_script "${client_start_script}" "exec \"${deskflow_client_bin}\" --no-daemon --name \"${client_runtime_name}\" \"${server_ip}\""
+fi
 log "client launcher written: ${client_start_script}"
 log "start command: ${client_start_script}"
 
