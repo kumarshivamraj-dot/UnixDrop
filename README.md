@@ -261,3 +261,8 @@ Recommended setup:
 - No automatic opening of received files.
 - Only URLs can auto-open (via `xdg-open`) when enabled.
 - File uploads are size-limited and filename-sanitized.
+
+-- Todo
+
+extend the support for firefox
+Drag and drop

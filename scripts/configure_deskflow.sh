@@ -17,6 +17,7 @@ Server role options:
 
 Client role options:
   --server-ip IP               Server IP or hostname to connect to
+  --client-name NAME           Client runtime screen name override (default: local hostname)
 
 Shared options:
   --verify                     Verify existing Deskflow setup for this role
@@ -58,32 +59,34 @@ detect_platform() {
   esac
 }
 
-detect_deskflow_core() {
+detect_deskflow_binary() {
   local platform="$1"
-  if command -v deskflow-core >/dev/null 2>&1; then
-    command -v deskflow-core
+  local binary_name="$2"
+  if command -v "${binary_name}" >/dev/null 2>&1; then
+    command -v "${binary_name}"
     return
   fi
 
   if [[ "${platform}" == "macos" ]]; then
-    local mac_path="/Applications/Deskflow.app/Contents/MacOS/deskflow-core"
+    local mac_path="/Applications/Deskflow.app/Contents/MacOS/${binary_name}"
     if [[ -x "${mac_path}" ]]; then
       echo "${mac_path}"
       return
     fi
   fi
 
-  die "deskflow-core not found. Install Deskflow first."
+  die "${binary_name} not found. Install Deskflow first."
 }
 
-find_deskflow_core() {
+find_deskflow_binary() {
   local platform="$1"
-  if command -v deskflow-core >/dev/null 2>&1; then
-    command -v deskflow-core
+  local binary_name="$2"
+  if command -v "${binary_name}" >/dev/null 2>&1; then
+    command -v "${binary_name}"
     return 0
   fi
   if [[ "${platform}" == "macos" ]]; then
-    local mac_path="/Applications/Deskflow.app/Contents/MacOS/deskflow-core"
+    local mac_path="/Applications/Deskflow.app/Contents/MacOS/${binary_name}"
     if [[ -x "${mac_path}" ]]; then
       echo "${mac_path}"
       return 0
@@ -236,25 +239,36 @@ tcp_reachable() {
   return 2
 }
 
+split_server_endpoint() {
+  local value="$1"
+  local host="$value"
+  local port="24800"
+  if [[ "${value}" == *:* ]]; then
+    host="${value%:*}"
+    port="${value##*:}"
+  fi
+  printf '%s %s\n' "${host}" "${port}"
+}
+
 extract_client_server_ip() {
   local start_script="$1"
   if [[ ! -f "${start_script}" ]]; then
     return 1
   fi
-  sed -n 's/.*client "\(.*\)".*/\1/p' "${start_script}" | tail -n 1
+  sed -n 's/.*"\([^"]*\)"[[:space:]]*$/\1/p' "${start_script}" | tail -n 1
 }
 
 verify_server_setup() {
   local platform="$1"
   local config_dir="$2"
-  local deskflow_core_path="${3:-}"
+  local deskflow_server_path="${3:-}"
   local server_config_file="${config_dir}/deskflow-server.conf"
   local start_script="${config_dir}/start-deskflow-server.sh"
 
-  if [[ -n "${deskflow_core_path}" ]]; then
-    check_result "true" "deskflow-core binary found" "${deskflow_core_path}"
+  if [[ -n "${deskflow_server_path}" ]]; then
+    check_result "true" "deskflow-server binary found" "${deskflow_server_path}"
   else
-    check_result "false" "deskflow-core binary found" "not found in PATH or /Applications"
+    check_result "false" "deskflow-server binary found" "not found in PATH or /Applications"
   fi
 
   [[ -f "${server_config_file}" ]] && check_result "true" "server config exists" "${server_config_file}" || check_result "false" "server config exists" "${server_config_file}"
@@ -296,15 +310,15 @@ verify_server_setup() {
 verify_client_setup() {
   local platform="$1"
   local config_dir="$2"
-  local deskflow_core_path="${3:-}"
+  local deskflow_client_path="${3:-}"
   local server_ip_input="$4"
   local start_script="${config_dir}/start-deskflow-client.sh"
   local server_ip_resolved="${server_ip_input}"
 
-  if [[ -n "${deskflow_core_path}" ]]; then
-    check_result "true" "deskflow-core binary found" "${deskflow_core_path}"
+  if [[ -n "${deskflow_client_path}" ]]; then
+    check_result "true" "deskflow-client binary found" "${deskflow_client_path}"
   else
-    check_result "false" "deskflow-core binary found" "not found in PATH or /Applications"
+    check_result "false" "deskflow-client binary found" "not found in PATH or /Applications"
   fi
 
   [[ -x "${start_script}" ]] && check_result "true" "client start script executable" "${start_script}" || check_result "false" "client start script executable" "${start_script}"
@@ -320,10 +334,11 @@ verify_client_setup() {
   fi
 
   if [[ -n "${server_ip_resolved}" ]]; then
-    if tcp_reachable "${server_ip_resolved}" "24800"; then
-      check_result "true" "server reachable on tcp/24800" "${server_ip_resolved}"
+    read -r server_host server_port <<<"$(split_server_endpoint "${server_ip_resolved}")"
+    if tcp_reachable "${server_host}" "${server_port}"; then
+      check_result "true" "server reachable on tcp/${server_port}" "${server_host}"
     else
-      check_result "false" "server reachable on tcp/24800" "${server_ip_resolved}"
+      check_result "false" "server reachable on tcp/${server_port}" "${server_host}"
     fi
   fi
 
@@ -338,7 +353,7 @@ verify_client_setup() {
 
 role=""
 server_ip=""
-server_name="$(hostname -s 2>/dev/null || hostname)"
+server_name="$(hostname 2>/dev/null || hostname -s)"
 client_name=""
 direction="right"
 autostart="false"
@@ -399,19 +414,28 @@ case "${direction}" in
 esac
 
 platform="$(detect_platform)"
-deskflow_core=""
+deskflow_server_bin=""
+deskflow_client_bin=""
 if [[ "${verify_mode}" == "true" ]]; then
-  deskflow_core="$(find_deskflow_core "${platform}" || true)"
+  if [[ "${role}" == "server" ]]; then
+    deskflow_server_bin="$(find_deskflow_binary "${platform}" "deskflow-server" || true)"
+  else
+    deskflow_client_bin="$(find_deskflow_binary "${platform}" "deskflow-client" || true)"
+  fi
 else
-  deskflow_core="$(detect_deskflow_core "${platform}")"
+  if [[ "${role}" == "server" ]]; then
+    deskflow_server_bin="$(detect_deskflow_binary "${platform}" "deskflow-server")"
+  else
+    deskflow_client_bin="$(detect_deskflow_binary "${platform}" "deskflow-client")"
+  fi
 fi
 
 if [[ "${verify_mode}" == "true" ]]; then
   log "running verification for role=${role}"
   if [[ "${role}" == "server" ]]; then
-    verify_server_setup "${platform}" "${config_dir}" "${deskflow_core}"
+    verify_server_setup "${platform}" "${config_dir}" "${deskflow_server_bin}"
   else
-    verify_client_setup "${platform}" "${config_dir}" "${deskflow_core}" "${server_ip}"
+    verify_client_setup "${platform}" "${config_dir}" "${deskflow_client_bin}" "${server_ip}"
   fi
   if [[ "${VERIFY_FAILS}" -gt 0 ]]; then
     die "verification failed with ${VERIFY_FAILS} issue(s)"
@@ -429,7 +453,7 @@ if [[ "${role}" == "server" ]]; then
   start_script="${config_dir}/start-deskflow-server.sh"
 
   write_server_config "${server_config_file}" "${server_name}" "${client_name}" "${direction}" "${reverse_direction}"
-  write_start_script "${start_script}" "exec \"${deskflow_core}\" server -s \"${server_config_file}\""
+  write_start_script "${start_script}" "exec \"${deskflow_server_bin}\" --no-daemon --name \"${server_name}\" --config \"${server_config_file}\""
 
   log "server config written: ${server_config_file}"
   log "start command: ${start_script}"
@@ -459,7 +483,8 @@ fi
 
 [[ -n "${server_ip}" ]] || die "--server-ip is required for client role"
 client_start_script="${config_dir}/start-deskflow-client.sh"
-write_start_script "${client_start_script}" "exec \"${deskflow_core}\" client \"${server_ip}\""
+client_runtime_name="${client_name:-$(hostname 2>/dev/null || hostname -s)}"
+write_start_script "${client_start_script}" "exec \"${deskflow_client_bin}\" --no-daemon --name \"${client_runtime_name}\" \"${server_ip}\""
 log "client launcher written: ${client_start_script}"
 log "start command: ${client_start_script}"
 
@@ -475,5 +500,5 @@ cat <<EOF
 
 Next steps (client):
 1) Start now: ${client_start_script}
-2) Verify the server service is running and reachable at ${server_ip}:24800
+2) Verify the server service is running and reachable at ${server_ip}
 EOF
