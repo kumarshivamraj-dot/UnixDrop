@@ -64,6 +64,12 @@ Run from repo root:
 ./deskbridge tui
 ```
 
+TUI keys:
+
+- `q`: quit
+- `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
+- `d`: start Deskflow using configured start script
+
 Compatibility wrappers:
 
 ```bash
