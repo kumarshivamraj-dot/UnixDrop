@@ -62,6 +62,7 @@ Run from repo root:
 ./deskbridge status
 ./deskbridge health
 ./deskbridge tui
+./deskbridge clean
 ```
 
 TUI keys:
@@ -69,6 +70,14 @@ TUI keys:
 - `q`: quit
 - `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
 - `d`: start Deskflow using configured start script
+
+If Deskflow gets stuck in duplicate client loops (`already connected`), run:
+
+```bash
+./deskbridge clean
+```
+
+This unloads conflicting autostarts and kills stale Deskflow/Barrier processes.
 
 Compatibility wrappers:
 
