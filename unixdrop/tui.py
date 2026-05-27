@@ -4,6 +4,7 @@ import json
 import os
 import re
 import select
+import socket
 import subprocess
 import sys
 import termios
@@ -251,6 +252,41 @@ def _start_deskflow_now() -> tuple[bool, str]:
         return False, f"deskflow start failed: {exc}"
 
 
+def _local_tcp_open(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex((host, int(port))) == 0
+    except Exception:
+        return False
+
+
+def _start_linux_receiver_now() -> tuple[bool, str]:
+    if not sys.platform.startswith("linux"):
+        return True, "linux receiver autostart skipped (non-linux)"
+
+    cfg = load_config()
+    receiver_port = int(cfg.port)
+    if _local_tcp_open("127.0.0.1", receiver_port):
+        return True, f"linux receiver already listening on 127.0.0.1:{receiver_port}"
+
+    script = _project_dir() / "scripts" / "run_linux_receiver.sh"
+    if not script.exists():
+        return False, f"linux receiver script missing: {script}"
+    if not os.access(script, os.X_OK):
+        return False, f"linux receiver script not executable: {script}"
+    try:
+        proc = subprocess.Popen(
+            [str(script)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True, f"linux receiver start requested (pid={proc.pid})"
+    except Exception as exc:
+        return False, f"linux receiver start failed: {exc}"
+
+
 def _restart_deskflow_client_now() -> tuple[bool, str]:
     cfg = load_config()
     script = cfg.deskflow_linux_start_script
@@ -303,6 +339,9 @@ def _render(
 def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
     interval = max(interval_seconds, 0.5)
     message = "ready"
+    receiver_ok, receiver_detail = _start_linux_receiver_now()
+    if sys.platform.startswith("linux"):
+        message = receiver_detail if receiver_ok else f"warning: {receiver_detail}"
     with _raw_stdin():
         while True:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

@@ -13,6 +13,7 @@ from unixdrop.tui import (
     _first_endpoint_host,
     _parse_health,
     _restart_deskflow_client_now,
+    _start_linux_receiver_now,
     _sync_receiver_endpoint,
 )
 
@@ -124,6 +125,21 @@ class TuiTests(unittest.TestCase):
             payload = json.loads(config_path.read_text())
             self.assertEqual(payload["receiver"]["host"], "100.118.15.70")
             self.assertEqual(payload["receiver_url"], "http://100.118.15.70:8765")
+
+    @patch("unixdrop.tui.sys.platform", "darwin")
+    def test_start_linux_receiver_skips_on_non_linux(self) -> None:
+        ok, detail = _start_linux_receiver_now()
+        self.assertTrue(ok)
+        self.assertIn("skipped", detail)
+
+    @patch("unixdrop.tui.sys.platform", "linux")
+    @patch("unixdrop.tui._local_tcp_open", return_value=True)
+    @patch("unixdrop.tui.load_config")
+    def test_start_linux_receiver_noop_when_listening(self, load_config_mock, _local_open_mock) -> None:
+        load_config_mock.return_value = SimpleNamespace(port=8765)
+        ok, detail = _start_linux_receiver_now()
+        self.assertTrue(ok)
+        self.assertIn("already listening", detail)
 
 
 if __name__ == "__main__":
