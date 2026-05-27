@@ -63,6 +63,8 @@ Run from repo root:
 ./deskbridge health
 ./deskbridge tui
 ./deskbridge clean
+./deskbridge deskflow --role server --client-name thinkpad --direction right
+./deskbridge deskflow --role client --server-hosts <lan-ip>:24800 --client-name thinkpad
 ```
 
 TUI keys:
@@ -141,6 +143,13 @@ Use the included setup script on each machine:
 
 ```bash
 ./scripts/configure_deskflow.sh --role client --server-ip <server-ip> --autostart
+```
+
+Equivalent `deskbridge` commands:
+
+```bash
+./deskbridge deskflow --role server --client-name thinkpad --direction right --autostart
+./deskbridge deskflow --role client --server-ip <server-ip> --client-name thinkpad --autostart
 ```
 
 Prefer LAN first, Tailscale fallback:
