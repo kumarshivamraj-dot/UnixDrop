@@ -148,6 +148,28 @@ def _start_deskflow_now() -> tuple[bool, str]:
         return False, f"deskflow start failed: {exc}"
 
 
+def _restart_deskflow_client_now() -> tuple[bool, str]:
+    cfg = load_config()
+    script = cfg.deskflow_linux_start_script
+    if not script.exists():
+        return False, f"deskflow client start script missing: {script}"
+    if not os.access(script, os.X_OK):
+        return False, f"deskflow client start script not executable: {script}"
+
+    # Ensure endpoint changes apply immediately by dropping stale client processes first.
+    for command in (["pkill", "-f", "deskflow-client"], ["pkill", "-f", "deskflow-core.*client"]):
+        try:
+            subprocess.run(command, capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            break
+
+    try:
+        proc = subprocess.Popen([str(script)])
+        return True, f"deskflow client restart requested (pid={proc.pid})"
+    except Exception as exc:
+        return False, f"deskflow client restart failed: {exc}"
+
+
 def _render(
     snapshot_time: str,
     checks: list[tuple[bool, str, str]],
@@ -199,9 +221,8 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                 ok, detail = _apply_client_server_hosts(entered)
                 message = detail
                 if ok:
-                    start_ok, start_detail = _start_deskflow_now()
-                    if not start_ok:
-                        message = f"{detail} | {start_detail}"
+                    _, start_detail = _restart_deskflow_client_now()
+                    message = f"{detail} | {start_detail}"
                 continue
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()
