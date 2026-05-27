@@ -664,12 +664,38 @@ first_reachable_endpoint_runtime() {
   return 1
 }
 
+update_remote_host_runtime() {
+  local endpoint="\$1"
+  local host=""
+  local port=""
+  local deskflow_conf_dir="\${HOME}/.config/Deskflow"
+  local deskflow_conf_path="\${deskflow_conf_dir}/Deskflow.conf"
+  local tmp_file=""
+
+  read -r host port <<<"\$(split_server_endpoint_runtime "\${endpoint}")"
+  [[ -n "\${host}" ]] || return 0
+
+  mkdir -p "\${deskflow_conf_dir}"
+  if [[ -f "\${deskflow_conf_path}" ]]; then
+    if grep -Eq '^[[:space:]]*remoteHost[[:space:]]*=' "\${deskflow_conf_path}"; then
+      tmp_file="\$(mktemp)"
+      sed -E "s|^[[:space:]]*remoteHost[[:space:]]*=.*$|remoteHost=\${host}|" "\${deskflow_conf_path}" > "\${tmp_file}"
+      mv "\${tmp_file}" "\${deskflow_conf_path}"
+    else
+      printf '\nremoteHost=%s\n' "\${host}" >> "\${deskflow_conf_path}"
+    fi
+  else
+    printf 'remoteHost=%s\n' "\${host}" > "\${deskflow_conf_path}"
+  fi
+}
+
 selected_server="\$(first_reachable_endpoint_runtime "\${server_candidates_csv}" || true)"
 if [[ -z "\${selected_server}" ]]; then
   echo "No server address configured (empty endpoint list)" >&2
   exit 1
 fi
 
+update_remote_host_runtime "\${selected_server}"
 exec "${deskflow_client_bin}" ${deskflow_client_mode} \${new_instance_flag} --no-daemon --name "${client_runtime_name}" "\${selected_server}"
 EOF
 )"
