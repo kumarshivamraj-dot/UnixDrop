@@ -149,19 +149,50 @@ def _first_endpoint_host(server_hosts: str) -> str:
     return ""
 
 
+def _parse_receiver_override(value: str) -> tuple[str, int | None]:
+    text = value.strip()
+    if not text:
+        raise ValueError("empty receiver override")
+
+    if "://" in text:
+        parsed = urlparse(text)
+        if not parsed.hostname:
+            raise ValueError(f"invalid receiver override: {value}")
+        return parsed.hostname, parsed.port
+
+    if text.startswith("[") and "]" in text:
+        host = text[1:text.index("]")]
+        remainder = text[text.index("]") + 1:].strip()
+        if remainder.startswith(":"):
+            port_value = remainder[1:].strip()
+            if port_value:
+                return host, int(port_value)
+        return host, None
+
+    if text.count(":") == 1:
+        host, port_value = text.split(":", 1)
+        host = host.strip()
+        port_value = port_value.strip()
+        if not host:
+            raise ValueError(f"invalid receiver override: {value}")
+        if port_value:
+            return host, int(port_value)
+        return host, None
+
+    return text, None
+
+
 def _sync_receiver_endpoint(
     server_hosts: str,
     receiver_url_override: str | None = None,
 ) -> tuple[bool, str]:
     host = ""
-    port = 8765
+    override_port: int | None = None
     if receiver_url_override:
-        parsed_override = urlparse(receiver_url_override.strip())
-        if not parsed_override.hostname:
-            return False, f"invalid receiver url override: {receiver_url_override}"
-        host = parsed_override.hostname
-        if parsed_override.port:
-            port = parsed_override.port
+        try:
+            host, override_port = _parse_receiver_override(receiver_url_override)
+        except (ValueError, TypeError):
+            return False, f"invalid receiver override: {receiver_url_override}"
     else:
         host = _first_endpoint_host(server_hosts)
         if not host:
@@ -179,16 +210,17 @@ def _sync_receiver_endpoint(
     receiver = raw.get("receiver") if isinstance(raw.get("receiver"), dict) else {}
     receiver_url = str(raw.get("receiver_url", "")).strip()
 
-    if not receiver_url_override:
-        port = receiver.get("port", 8765)
-        try:
-            port = int(port)
-        except (TypeError, ValueError):
-            port = 8765
-        if receiver_url:
-            parsed = urlparse(receiver_url)
-            if parsed.port:
-                port = parsed.port
+    port = receiver.get("port", 8765)
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 8765
+    if receiver_url:
+        parsed = urlparse(receiver_url)
+        if parsed.port:
+            port = parsed.port
+    if override_port is not None:
+        port = override_port
 
     receiver["host"] = host
     receiver["port"] = port
@@ -293,14 +325,23 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                 else:
                     receiver_override = None
                     prefix = "saved endpoints"
+                receiver_input = _prompt_line(
+                    "Linux receiver IP/host for UnixDrop (blank=same as first server host): "
+                ).strip()
+                if receiver_input:
+                    receiver_override = receiver_input
                 ok, detail = _apply_client_server_hosts(entered)
+                recv_ok, recv_detail = _sync_receiver_endpoint(entered, receiver_override)
                 message = detail
                 if ok:
-                    recv_ok, recv_detail = _sync_receiver_endpoint(entered, receiver_override)
                     _, start_detail = _restart_deskflow_client_now()
                     message = f"{prefix}: {entered} | {recv_detail} | {start_detail}"
                     if not recv_ok:
                         message = f"{prefix}: {entered} | warning: {recv_detail} | {start_detail}"
+                else:
+                    message = f"{detail} | {recv_detail}"
+                    if not recv_ok:
+                        message = f"{detail} | warning: {recv_detail}"
                 continue
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()
