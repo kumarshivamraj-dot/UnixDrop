@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 from urllib import request
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 from unixdrop.config import load_config
@@ -133,9 +134,10 @@ def is_supported_web_url(url: str) -> bool:
 
 
 def send_url(url: str, no_open: bool = False) -> None:
+    target = CONFIG.receiver_url.rstrip("/") + "/api/link"
     body = json.dumps({"url": url, "source": "mac-browser-helper", "no_open": no_open}).encode("utf-8")
     req = request.Request(
-        CONFIG.receiver_url.rstrip("/") + "/api/link",
+        target,
         data=body,
         method="POST",
         headers={
@@ -143,8 +145,20 @@ def send_url(url: str, no_open: bool = False) -> None:
             "Content-Type": "application/json",
         },
     )
-    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds):
-        return
+    try:
+        with request.urlopen(req, timeout=CONFIG.request_timeout_seconds):
+            return
+    except HTTPError as exc:
+        raise SystemExit(
+            f"receiver rejected tab send ({exc.code}) at {target}. "
+            "Check auth token and receiver logs."
+        ) from exc
+    except URLError as exc:
+        reason = str(exc.reason)
+        raise SystemExit(
+            f"could not reach Linux receiver at {target}: {reason}. "
+            "Start/verify receiver with `./deskbridge status` and `./deskbridge health`."
+        ) from exc
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -3,11 +3,18 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from unixdrop.tui import _parse_health, _restart_deskflow_client_now
+from unixdrop.config import ENV_CONFIG_PATH
+from unixdrop.tui import (
+    _first_endpoint_host,
+    _parse_health,
+    _restart_deskflow_client_now,
+    _sync_receiver_endpoint,
+)
 
 
 class TuiTests(unittest.TestCase):
@@ -63,6 +70,60 @@ class TuiTests(unittest.TestCase):
             ok, detail = _restart_deskflow_client_now()
             self.assertFalse(ok)
             self.assertIn("not executable", detail)
+
+    def test_first_endpoint_host(self) -> None:
+        self.assertEqual(_first_endpoint_host("192.168.1.5:24800,100.64.0.2:24800"), "192.168.1.5")
+        self.assertEqual(_first_endpoint_host("  server.local:24800 "), "server.local")
+        self.assertEqual(_first_endpoint_host(""), "")
+
+    def test_sync_receiver_endpoint_updates_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth_token": "token",
+                        "receiver_url": "http://100.118.15.70:8765",
+                        "receiver": {
+                            "host": "100.118.15.70",
+                            "port": 8765,
+                        },
+                    }
+                )
+            )
+            with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
+                ok, detail = _sync_receiver_endpoint("192.168.1.5:24800,100.64.0.2:24800")
+            self.assertTrue(ok)
+            self.assertIn("http://192.168.1.5:8765", detail)
+            payload = json.loads(config_path.read_text())
+            self.assertEqual(payload["receiver"]["host"], "192.168.1.5")
+            self.assertEqual(payload["receiver_url"], "http://192.168.1.5:8765")
+
+    def test_sync_receiver_endpoint_override_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth_token": "token",
+                        "receiver_url": "http://10.0.0.8:8765",
+                        "receiver": {
+                            "host": "10.0.0.8",
+                            "port": 8765,
+                        },
+                    }
+                )
+            )
+            with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
+                ok, detail = _sync_receiver_endpoint(
+                    "192.168.1.5:24800",
+                    "http://100.118.15.70:8765",
+                )
+            self.assertTrue(ok)
+            self.assertIn("http://100.118.15.70:8765", detail)
+            payload = json.loads(config_path.read_text())
+            self.assertEqual(payload["receiver"]["host"], "100.118.15.70")
+            self.assertEqual(payload["receiver_url"], "http://100.118.15.70:8765")
 
 
 if __name__ == "__main__":

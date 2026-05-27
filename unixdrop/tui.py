@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
@@ -11,13 +12,16 @@ import tty
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
-from unixdrop.config import load_config
+from unixdrop.config import DEFAULT_CONFIG_PATH, ENV_CONFIG_PATH, load_config
 from unixdrop.health import health_lines
 from unixdrop.status import status_lines
 
 
 HEALTH_RE = re.compile(r"^\[(ok|fail)\]\s+(.+?):\s*(.*)$")
+DEFAULT_TUI_SERVER_HOSTS = "100.76.14.117:24800"
+DEFAULT_TUI_RECEIVER_URL = "http://100.118.15.70:8765"
 
 
 def _parse_health(lines: list[str]) -> list[tuple[bool, str, str]]:
@@ -132,6 +136,73 @@ def _apply_client_server_hosts(server_hosts: str) -> tuple[bool, str]:
     return False, f"failed to save endpoints: {detail}"
 
 
+def _first_endpoint_host(server_hosts: str) -> str:
+    for raw in server_hosts.split(","):
+        endpoint = raw.strip()
+        if not endpoint:
+            continue
+        if endpoint.startswith("[") and "]" in endpoint:
+            return endpoint[1:endpoint.index("]")]
+        if endpoint.count(":") == 1:
+            return endpoint.split(":", 1)[0].strip()
+        return endpoint
+    return ""
+
+
+def _sync_receiver_endpoint(
+    server_hosts: str,
+    receiver_url_override: str | None = None,
+) -> tuple[bool, str]:
+    host = ""
+    port = 8765
+    if receiver_url_override:
+        parsed_override = urlparse(receiver_url_override.strip())
+        if not parsed_override.hostname:
+            return False, f"invalid receiver url override: {receiver_url_override}"
+        host = parsed_override.hostname
+        if parsed_override.port:
+            port = parsed_override.port
+    else:
+        host = _first_endpoint_host(server_hosts)
+        if not host:
+            return False, "could not derive receiver host from entered endpoints"
+
+    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
+    if not config_path.exists():
+        return False, f"unixdrop config missing: {config_path}"
+
+    try:
+        raw = json.loads(config_path.read_text())
+    except Exception as exc:
+        return False, f"failed to read unixdrop config: {exc}"
+
+    receiver = raw.get("receiver") if isinstance(raw.get("receiver"), dict) else {}
+    receiver_url = str(raw.get("receiver_url", "")).strip()
+
+    if not receiver_url_override:
+        port = receiver.get("port", 8765)
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 8765
+        if receiver_url:
+            parsed = urlparse(receiver_url)
+            if parsed.port:
+                port = parsed.port
+
+    receiver["host"] = host
+    receiver["port"] = port
+    raw["receiver"] = receiver
+    raw["receiver_url"] = f"http://{host}:{port}"
+
+    try:
+        config_path.write_text(json.dumps(raw, indent=2) + "\n")
+    except Exception as exc:
+        return False, f"failed to write unixdrop config: {exc}"
+
+    return True, f"receiver endpoint set to http://{host}:{port}"
+
+
 def _start_deskflow_now() -> tuple[bool, str]:
     cfg = load_config()
     script = cfg.deskflow_linux_start_script
@@ -216,13 +287,20 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
             if key.lower() == "e":
                 entered = _prompt_line("Server endpoints (lan:24800,tailscale:24800): ").strip()
                 if not entered:
-                    message = "endpoint update cancelled"
-                    continue
+                    entered = DEFAULT_TUI_SERVER_HOSTS
+                    receiver_override = DEFAULT_TUI_RECEIVER_URL
+                    prefix = "empty input -> using defaults"
+                else:
+                    receiver_override = None
+                    prefix = "saved endpoints"
                 ok, detail = _apply_client_server_hosts(entered)
                 message = detail
                 if ok:
+                    recv_ok, recv_detail = _sync_receiver_endpoint(entered, receiver_override)
                     _, start_detail = _restart_deskflow_client_now()
-                    message = f"{detail} | {start_detail}"
+                    message = f"{prefix}: {entered} | {recv_detail} | {start_detail}"
+                    if not recv_ok:
+                        message = f"{prefix}: {entered} | warning: {recv_detail} | {start_detail}"
                 continue
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()

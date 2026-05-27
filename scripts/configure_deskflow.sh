@@ -570,6 +570,17 @@ new_instance_flag=""
 if "${deskflow_server_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
   new_instance_flag="--new-instance"
 fi
+if command -v lsof >/dev/null 2>&1; then
+  existing_listener="\$(lsof -nP -iTCP:24800 -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "\${existing_listener}" ]]; then
+    if printf '%s\n' "\${existing_listener}" | grep -Eiq 'deskflow|barrier|synergy'; then
+      echo "Deskflow server already listening on TCP 24800; skipping duplicate start."
+      exit 0
+    fi
+    echo "TCP 24800 already in use by another process. Resolve it before starting Deskflow server." >&2
+    exit 1
+  fi
+fi
 exec "${deskflow_server_bin}" ${deskflow_server_mode} \${new_instance_flag} --no-daemon --name "${server_name}" --config "${server_config_file}"
 EOF
 )"
@@ -689,6 +700,36 @@ update_remote_host_runtime() {
   fi
 }
 
+guard_single_client_instance_runtime() {
+  local lock_token="${client_runtime_name//[^[:alnum:]_.-]/_}"
+  local lock_dir="\${TMPDIR:-/tmp}/deskbridge-deskflow-client-\${lock_token}.lock"
+  local lock_pid_file="\${lock_dir}/pid"
+  local existing_pid=""
+
+  if mkdir "\${lock_dir}" >/dev/null 2>&1; then
+    printf '%s\n' "\$\$" > "\${lock_pid_file}"
+    return 0
+  fi
+
+  if [[ -f "\${lock_pid_file}" ]]; then
+    existing_pid="\$(cat "\${lock_pid_file}" 2>/dev/null || true)"
+    if [[ -n "\${existing_pid}" ]] && kill -0 "\${existing_pid}" >/dev/null 2>&1; then
+      echo "Deskflow client already running for ${client_runtime_name} (pid=\${existing_pid}); skipping duplicate start."
+      exit 0
+    fi
+  fi
+
+  rm -rf "\${lock_dir}" >/dev/null 2>&1 || true
+  if mkdir "\${lock_dir}" >/dev/null 2>&1; then
+    printf '%s\n' "\$\$" > "\${lock_pid_file}"
+    return 0
+  fi
+
+  echo "Could not acquire Deskflow client start lock: \${lock_dir}" >&2
+  exit 1
+}
+
+guard_single_client_instance_runtime
 selected_server="\$(first_reachable_endpoint_runtime "\${server_candidates_csv}" || true)"
 if [[ -z "\${selected_server}" ]]; then
   echo "No server address configured (empty endpoint list)" >&2
