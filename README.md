@@ -62,6 +62,9 @@ Run from repo root:
 ./deskbridge status
 ./deskbridge health
 ./deskbridge tui
+./deskbridge drop
+./deskbridge drop ~/Downloads/report.pdf
+./deskbridge dropzone
 ./deskbridge clean
 ./deskbridge deskflow --role server --client-name thinkpad --direction right
 ./deskbridge deskflow --role client --server-hosts <lan-ip>:24800 --client-name thinkpad
@@ -72,6 +75,7 @@ TUI keys:
 - `q`: quit
 - `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
 - `d`: start Deskflow using configured start script
+- `o`: open the Drop to ThinkPad folder
 
 If Deskflow gets stuck in duplicate client loops (`already connected`), run:
 
@@ -223,6 +227,25 @@ Defaults:
 
 Behavior:
 
+- `deskbridge tui` shows a Drop to ThinkPad section with the folder, Linux inbox, pending file count, and last upload result.
+- Press `o` in the TUI or run `deskbridge drop` to open the drop folder.
+- Run `deskbridge dropzone` for a local browser page with a boxed drag-and-drop target.
+- Drag files into the drop folder, or stage files from a terminal:
+  ```bash
+  ./deskbridge drop ~/Downloads/report.pdf
+  ```
+- Send a file directly to any running UnixDrop receiver:
+  ```bash
+  ./deskbridge send ~/Downloads/report.pdf --to http://<receiver-ip>:8765
+  ```
+- Run a receiver on the other machine when you want files to flow back:
+  ```bash
+  ./deskbridge receive
+  ```
+- Create a watched folder on the current machine that sends to another receiver:
+  ```bash
+  ./deskbridge dropwatch --folder ~/Drop\ to\ Mac --to http://<mac-ip>:8765
+  ```
 - Mac agent watches drop folder.
 - Upload waits until file appears stable (not still writing).
 - Max upload size defaults to `500 MB` (`max_file_mb`).

@@ -252,6 +252,24 @@ def _start_deskflow_now() -> tuple[bool, str]:
         return False, f"deskflow start failed: {exc}"
 
 
+def _open_drop_folder_now() -> tuple[bool, str]:
+    cfg = load_config()
+    cfg.drop_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        command = ["open", str(cfg.drop_dir)]
+    elif sys.platform.startswith("linux"):
+        command = ["xdg-open", str(cfg.drop_dir)]
+    else:
+        return False, f"unsupported platform: {sys.platform}"
+    try:
+        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, f"opened drop folder: {cfg.drop_dir} (pid={proc.pid})"
+    except FileNotFoundError:
+        return False, f"folder opener not found for platform: {sys.platform}"
+    except Exception as exc:
+        return False, f"open drop folder failed: {exc}"
+
+
 def _local_tcp_open(host: str, port: int) -> bool:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -318,7 +336,10 @@ def _render(
 ) -> None:
     _clear()
     print(_cyan("Deskbridge TUI"))
-    print(f"Updated: {snapshot_time} | refresh={interval:.1f}s | keys: q quit, e edit endpoints, d start deskflow")
+    print(
+        f"Updated: {snapshot_time} | refresh={interval:.1f}s | "
+        "keys: q quit, e edit endpoints, d start deskflow, o open drop"
+    )
     print("")
 
     receiver = status.get("linux receiver reachable", "unknown")
@@ -328,6 +349,13 @@ def _render(
     print(f"Clipboard mode: {clipboard_mode}")
     print(f"Deskflow: {deskflow_hint}")
     print(f"Message: {message}")
+    print("")
+
+    print("Drop to ThinkPad:")
+    print(f"  folder: {status.get('drop folder', 'unknown')}")
+    print(f"  Linux inbox: {status.get('linux inbox', 'unknown')}")
+    print(f"  pending: {status.get('pending files in drop folder', 'unknown')}")
+    print(f"  last upload: {status.get('last upload result', 'none')}")
     print("")
 
     print("Component checks:")
@@ -384,4 +412,8 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                 continue
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()
+                message = detail if ok else f"error: {detail}"
+                continue
+            if key.lower() == "o":
+                ok, detail = _open_drop_folder_now()
                 message = detail if ok else f"error: {detail}"

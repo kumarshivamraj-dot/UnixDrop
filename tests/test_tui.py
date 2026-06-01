@@ -11,6 +11,7 @@ from unittest.mock import patch
 from unixdrop.config import ENV_CONFIG_PATH
 from unixdrop.tui import (
     _first_endpoint_host,
+    _open_drop_folder_now,
     _parse_health,
     _restart_deskflow_client_now,
     _start_linux_receiver_now,
@@ -140,6 +141,23 @@ class TuiTests(unittest.TestCase):
         ok, detail = _start_linux_receiver_now()
         self.assertTrue(ok)
         self.assertIn("already listening", detail)
+
+    @patch("unixdrop.tui.sys.platform", "darwin")
+    @patch("unixdrop.tui.subprocess.Popen")
+    @patch("unixdrop.tui.load_config")
+    def test_open_drop_folder_uses_configured_folder(self, load_config_mock, popen_mock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            drop_dir = Path(tmp) / "Drop to ThinkPad"
+            load_config_mock.return_value = SimpleNamespace(drop_dir=drop_dir)
+            popen_mock.return_value = SimpleNamespace(pid=1234)
+
+            ok, detail = _open_drop_folder_now()
+
+            self.assertTrue(ok)
+            self.assertIn(str(drop_dir), detail)
+            popen_mock.assert_called_once()
+            self.assertEqual(popen_mock.call_args.args[0], ["open", str(drop_dir)])
+            self.assertTrue(drop_dir.exists())
 
 
 if __name__ == "__main__":
