@@ -177,6 +177,54 @@ sync_macos_core_server_config() {
   log "synced macOS core fallback config: ${fallback_file}"
 }
 
+write_deskflow_client_settings() {
+  local config_path="$1"
+  local client_name="$2"
+  local tmp_file=""
+
+  mkdir -p "$(dirname "${config_path}")"
+  if [[ ! -f "${config_path}" ]]; then
+    cat > "${config_path}" <<EOF
+[core]
+computerName=${client_name}
+EOF
+    return
+  fi
+
+  tmp_file="$(mktemp)"
+  if grep -Eq '^[[:space:]]*computerName[[:space:]]*=' "${config_path}"; then
+    sed -E "s|^[[:space:]]*computerName[[:space:]]*=.*$|computerName=${client_name}|" "${config_path}" > "${tmp_file}"
+    mv "${tmp_file}" "${config_path}"
+    return
+  fi
+
+  if grep -Eq '^[[:space:]]*\[core\][[:space:]]*$' "${config_path}"; then
+    awk -v value="${client_name}" '
+      BEGIN { inserted = 0; in_core = 0 }
+      /^[[:space:]]*\[core\][[:space:]]*$/ {
+        print
+        print "computerName=" value
+        inserted = 1
+        in_core = 1
+        next
+      }
+      /^[[:space:]]*\[/ { in_core = 0 }
+      { print }
+      END {
+        if (!inserted) {
+          print ""
+          print "[core]"
+          print "computerName=" value
+        }
+      }
+    ' "${config_path}" > "${tmp_file}"
+  else
+    cat "${config_path}" > "${tmp_file}"
+    printf '\n[core]\ncomputerName=%s\n' "${client_name}" >> "${tmp_file}"
+  fi
+  mv "${tmp_file}" "${config_path}"
+}
+
 install_linux_autostart() {
   local role="$1"
   local start_script="$2"
@@ -619,6 +667,16 @@ fi
 [[ -n "${server_ip}" ]] || die "--server-ip is required for client role"
 client_start_script="${config_dir}/start-deskflow-client.sh"
 client_runtime_name="${client_name:-$(hostname 2>/dev/null || hostname -s)}"
+write_deskflow_client_settings "${config_dir}/Deskflow.conf" "${client_runtime_name}"
+log "client screen name written: ${config_dir}/Deskflow.conf"
+if [[ "${config_dir}" != "${HOME}/.config/Deskflow" ]]; then
+  write_deskflow_client_settings "${HOME}/.config/Deskflow/Deskflow.conf" "${client_runtime_name}"
+  log "client screen name written: ${HOME}/.config/Deskflow/Deskflow.conf"
+fi
+if [[ "${platform}" == "macos" ]]; then
+  write_deskflow_client_settings "${HOME}/Library/Deskflow/Deskflow.conf" "${client_runtime_name}"
+  log "client screen name written: ${HOME}/Library/Deskflow/Deskflow.conf"
+fi
 client_start_body="$(cat <<EOF
 new_instance_flag=""
 if "${deskflow_client_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
@@ -697,6 +755,14 @@ update_remote_host_runtime() {
     fi
   else
     printf 'remoteHost=%s\n' "\${host}" > "\${deskflow_conf_path}"
+  fi
+
+  if grep -Eq '^[[:space:]]*computerName[[:space:]]*=' "\${deskflow_conf_path}"; then
+    tmp_file="\$(mktemp)"
+    sed -E "s|^[[:space:]]*computerName[[:space:]]*=.*$|computerName=${client_runtime_name}|" "\${deskflow_conf_path}" > "\${tmp_file}"
+    mv "\${tmp_file}" "\${deskflow_conf_path}"
+  else
+    printf '\n[core]\ncomputerName=%s\n' "${client_runtime_name}" >> "\${deskflow_conf_path}"
   fi
 }
 
