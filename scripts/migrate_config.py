@@ -48,12 +48,37 @@ def _parse_clipboard_mode(raw: dict) -> str:
     return "off"
 
 
+def _deskflow_script(
+    raw: dict,
+    deskflow: dict,
+    *,
+    top_level_key: str,
+    nested_key: str,
+    legacy_top_level_key: str,
+    legacy_nested_key: str,
+    default: str,
+) -> str:
+    return str(
+        raw.get(
+            top_level_key,
+            deskflow.get(
+                nested_key,
+                raw.get(
+                    legacy_top_level_key,
+                    deskflow.get(legacy_nested_key, default),
+                ),
+            ),
+        )
+    )
+
+
 def migrate(raw: dict) -> dict:
     receiver = raw.get("receiver") if isinstance(raw.get("receiver"), dict) else {}
     clipboard = raw.get("clipboard") if isinstance(raw.get("clipboard"), dict) else {}
     drop = raw.get("drop") if isinstance(raw.get("drop"), dict) else {}
     tabs = raw.get("tabs") if isinstance(raw.get("tabs"), dict) else {}
     obsidian = raw.get("obsidian") if isinstance(raw.get("obsidian"), dict) else {}
+    deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
 
     host, port = _parse_receiver(raw)
     inbox_dir = str(raw.get("inbox_dir", receiver.get("linux_inbox", "~/Inbox/MacDrop")))
@@ -79,6 +104,28 @@ def migrate(raw: dict) -> dict:
         },
         "tabs": {
             "default_browser": str(raw.get("tabs_default_browser", tabs.get("default_browser", "auto"))),
+        },
+        "deskflow": {
+            "enabled": _as_bool(raw.get("deskflow_enabled", deskflow.get("enabled", False))),
+            "role": str(raw.get("deskflow_role", deskflow.get("role", "off"))),
+            "server_start_script": _deskflow_script(
+                raw,
+                deskflow,
+                top_level_key="deskflow_server_start_script",
+                nested_key="server_start_script",
+                legacy_top_level_key="deskflow_mac_start_script",
+                legacy_nested_key="mac_start_script",
+                default="~/.config/deskflow/start-deskflow-server.sh",
+            ),
+            "client_start_script": _deskflow_script(
+                raw,
+                deskflow,
+                top_level_key="deskflow_client_start_script",
+                nested_key="client_start_script",
+                legacy_top_level_key="deskflow_linux_start_script",
+                legacy_nested_key="linux_start_script",
+                default="~/.config/deskflow/start-deskflow-client.sh",
+            ),
         },
         "link_log_path": str(raw.get("link_log_path", "~/Inbox/MacDrop/link-log.jsonl")),
         "state_dir": str(raw.get("state_dir", "~/.local/state/unixdrop")),

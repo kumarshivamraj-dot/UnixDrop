@@ -14,6 +14,7 @@ from unixdrop.tui import (
     _open_drop_folder_now,
     _parse_health,
     _restart_deskflow_client_now,
+    _start_local_receiver_now,
     _start_linux_receiver_now,
     _sync_receiver_endpoint,
 )
@@ -24,14 +25,14 @@ class TuiTests(unittest.TestCase):
         rows = _parse_health(
             [
                 "Deskbridge health",
-                "[ok] HTTP receiver reachable: reachable",
+                "[ok] Peer HTTP receiver reachable: reachable",
                 "[fail] send test ping: timeout",
             ]
         )
         self.assertEqual(
             rows,
             [
-                (True, "HTTP receiver reachable", "reachable"),
+                (True, "Peer HTTP receiver reachable", "reachable"),
                 (False, "send test ping", "timeout"),
             ],
         )
@@ -44,7 +45,7 @@ class TuiTests(unittest.TestCase):
             script = Path(tmp) / "start-deskflow-client.sh"
             script.write_text("#!/usr/bin/env bash\nexit 0\n")
             os.chmod(script, 0o755)
-            load_config_mock.return_value = SimpleNamespace(deskflow_linux_start_script=script)
+            load_config_mock.return_value = SimpleNamespace(deskflow_client_start_script=script)
             popen_mock.return_value = SimpleNamespace(pid=4321)
 
             ok, detail = _restart_deskflow_client_now()
@@ -57,7 +58,7 @@ class TuiTests(unittest.TestCase):
     @patch("unixdrop.tui.load_config")
     def test_restart_client_missing_script(self, load_config_mock) -> None:
         missing = Path("/tmp/does-not-exist-client.sh")
-        load_config_mock.return_value = SimpleNamespace(deskflow_linux_start_script=missing)
+        load_config_mock.return_value = SimpleNamespace(deskflow_client_start_script=missing)
         ok, detail = _restart_deskflow_client_now()
         self.assertFalse(ok)
         self.assertIn("missing", detail)
@@ -68,7 +69,7 @@ class TuiTests(unittest.TestCase):
             script = Path(tmp) / "start-deskflow-client.sh"
             script.write_text("#!/usr/bin/env bash\nexit 0\n")
             os.chmod(script, 0o644)
-            load_config_mock.return_value = SimpleNamespace(deskflow_linux_start_script=script)
+            load_config_mock.return_value = SimpleNamespace(deskflow_client_start_script=script)
             ok, detail = _restart_deskflow_client_now()
             self.assertFalse(ok)
             self.assertIn("not executable", detail)
@@ -127,16 +128,17 @@ class TuiTests(unittest.TestCase):
             self.assertEqual(payload["receiver"]["host"], "100.118.15.70")
             self.assertEqual(payload["receiver_url"], "http://100.118.15.70:8765")
 
-    @patch("unixdrop.tui.sys.platform", "darwin")
-    def test_start_linux_receiver_skips_on_non_linux(self) -> None:
-        ok, detail = _start_linux_receiver_now()
-        self.assertTrue(ok)
-        self.assertIn("skipped", detail)
-
-    @patch("unixdrop.tui.sys.platform", "linux")
     @patch("unixdrop.tui._local_tcp_open", return_value=True)
     @patch("unixdrop.tui.load_config")
-    def test_start_linux_receiver_noop_when_listening(self, load_config_mock, _local_open_mock) -> None:
+    def test_start_local_receiver_noop_when_listening(self, load_config_mock, _local_open_mock) -> None:
+        load_config_mock.return_value = SimpleNamespace(port=8765)
+        ok, detail = _start_local_receiver_now()
+        self.assertTrue(ok)
+        self.assertIn("already listening", detail)
+
+    @patch("unixdrop.tui._local_tcp_open", return_value=True)
+    @patch("unixdrop.tui.load_config")
+    def test_start_linux_receiver_alias_noop_when_listening(self, load_config_mock, _local_open_mock) -> None:
         load_config_mock.return_value = SimpleNamespace(port=8765)
         ok, detail = _start_linux_receiver_now()
         self.assertTrue(ok)

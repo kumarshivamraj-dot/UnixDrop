@@ -63,7 +63,7 @@ class LinuxServiceTests(unittest.TestCase):
         with mock.patch.object(self.module.shutil, "which", return_value=None):
             opened, error = self.module._open_link("https://example.com")
         self.assertFalse(opened)
-        self.assertEqual(error, "xdg-open not found")
+        self.assertEqual(error, "link opener not found")
 
     def test_open_link_handles_popen_failure(self) -> None:
         with (

@@ -18,6 +18,12 @@ CLIPBOARD_MODES = {
     "two_way",
 }
 
+DESKFLOW_ROLES = {
+    "off",
+    "server",
+    "client",
+}
+
 
 @dataclass
 class AppConfig:
@@ -45,6 +51,9 @@ class AppConfig:
     obsidian_poll_seconds: int = 10
     obsidian_excludes: list[str] | None = None
     deskflow_enabled: bool = False
+    deskflow_role: str = "off"
+    deskflow_server_start_script: Path = Path("~/.config/deskflow/start-deskflow-server.sh").expanduser()
+    deskflow_client_start_script: Path = Path("~/.config/deskflow/start-deskflow-client.sh").expanduser()
     deskflow_mac_start_script: Path = Path("~/.config/deskflow/start-deskflow-server.sh").expanduser()
     deskflow_linux_start_script: Path = Path("~/.config/deskflow/start-deskflow-client.sh").expanduser()
 
@@ -53,6 +62,13 @@ def parse_clipboard_mode(mode: str) -> str:
     normalized = str(mode).strip().lower().replace("-", "_")
     if normalized not in CLIPBOARD_MODES:
         raise ValueError(f"invalid clipboard mode: {mode}")
+    return normalized
+
+
+def parse_deskflow_role(role: str) -> str:
+    normalized = str(role).strip().lower().replace("-", "_")
+    if normalized not in DESKFLOW_ROLES:
+        raise ValueError(f"invalid deskflow role: {role}")
     return normalized
 
 
@@ -110,10 +126,20 @@ def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
 
     if "enabled" in deskflow and "deskflow_enabled" not in flat:
         flat["deskflow_enabled"] = deskflow["enabled"]
+    if "role" in deskflow and "deskflow_role" not in flat:
+        flat["deskflow_role"] = deskflow["role"]
+    if "server_start_script" in deskflow and "deskflow_server_start_script" not in flat:
+        flat["deskflow_server_start_script"] = deskflow["server_start_script"]
+    if "client_start_script" in deskflow and "deskflow_client_start_script" not in flat:
+        flat["deskflow_client_start_script"] = deskflow["client_start_script"]
     if "mac_start_script" in deskflow and "deskflow_mac_start_script" not in flat:
         flat["deskflow_mac_start_script"] = deskflow["mac_start_script"]
+    if "mac_start_script" in deskflow and "deskflow_server_start_script" not in flat:
+        flat["deskflow_server_start_script"] = deskflow["mac_start_script"]
     if "linux_start_script" in deskflow and "deskflow_linux_start_script" not in flat:
         flat["deskflow_linux_start_script"] = deskflow["linux_start_script"]
+    if "linux_start_script" in deskflow and "deskflow_client_start_script" not in flat:
+        flat["deskflow_client_start_script"] = deskflow["linux_start_script"]
 
     if "shared_clipboard_enabled" in raw or "clipboard_sync_enabled" in raw:
         warnings.append(
@@ -143,6 +169,12 @@ def _apply_paths(raw: dict) -> dict:
     converted["link_log_path"] = Path(raw.get("link_log_path", "~/Inbox/MacDrop/link-log.jsonl")).expanduser()
     converted["state_dir"] = Path(raw.get("state_dir", "~/.local/state/unixdrop")).expanduser()
     converted["obsidian_vault_dir"] = Path(raw.get("obsidian_vault_dir", "~/Obsidian/MainVault")).expanduser()
+    converted["deskflow_server_start_script"] = Path(
+        raw.get("deskflow_server_start_script", "~/.config/deskflow/start-deskflow-server.sh")
+    ).expanduser()
+    converted["deskflow_client_start_script"] = Path(
+        raw.get("deskflow_client_start_script", "~/.config/deskflow/start-deskflow-client.sh")
+    ).expanduser()
     converted["deskflow_mac_start_script"] = Path(
         raw.get("deskflow_mac_start_script", "~/.config/deskflow/start-deskflow-server.sh")
     ).expanduser()
@@ -165,6 +197,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     prepared = _apply_paths(flattened)
 
     prepared["clipboard_mode"] = parse_clipboard_mode(prepared.get("clipboard_mode", "off"))
+    prepared["deskflow_role"] = parse_deskflow_role(prepared.get("deskflow_role", "off"))
     prepared["max_clipboard_chars"] = int(prepared.get("max_clipboard_chars", 20000))
     prepared["max_file_mb"] = int(prepared.get("max_file_mb", 500))
     prepared["obsidian_conflict_strategy"] = str(prepared.get("obsidian_conflict_strategy", "copy"))
@@ -186,3 +219,18 @@ def clipboard_send_enabled(mode: str) -> bool:
 def clipboard_pull_enabled(mode: str) -> bool:
     parsed = parse_clipboard_mode(mode)
     return parsed in {"linux_to_mac", "two_way"}
+
+
+def deskflow_start_script(config: AppConfig, platform: str | None = None) -> Path | None:
+    role = parse_deskflow_role(config.deskflow_role)
+    if role == "server":
+        return config.deskflow_server_start_script
+    if role == "client":
+        return config.deskflow_client_start_script
+    if not config.deskflow_enabled:
+        return None
+    if platform == "darwin":
+        return config.deskflow_mac_start_script
+    if platform and platform.startswith("linux"):
+        return config.deskflow_linux_start_script
+    return None

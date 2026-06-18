@@ -9,7 +9,7 @@
     <string>/usr/bin/env</string>
     <string>python3</string>
     <string>-m</string>
-    <string>unixdrop.mac_agent</string>
+    <string>unixdrop.node</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__PROJECT_DIR__</string>

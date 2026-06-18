@@ -48,7 +48,7 @@ class SendBrowserUrlTests(unittest.TestCase):
         with mock.patch.object(self.module.request, "urlopen", side_effect=URLError("Connection refused")):
             with self.assertRaises(SystemExit) as exc:
                 self.module.send_url("https://example.com")
-        self.assertIn("could not reach Linux receiver", str(exc.exception))
+        self.assertIn("could not reach peer receiver", str(exc.exception))
         self.assertIn("Connection refused", str(exc.exception))
 
 

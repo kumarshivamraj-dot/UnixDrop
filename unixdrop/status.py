@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request
@@ -22,7 +24,11 @@ def _utc_now() -> datetime:
 def _read_state() -> dict:
     if not STATE_FILE.exists():
         return {}
-    return json.loads(STATE_FILE.read_text())
+    try:
+        loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _fetch_json(path: str) -> dict:
@@ -59,17 +65,33 @@ def _format_age(timestamp: float | None) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _check_mac_agent() -> bool:
-    try:
+def _check_local_node_service() -> tuple[bool, str]:
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["launchctl", "list", "com.unixdrop.agent"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            return False, "launchctl not found"
+        return result.returncode == 0, "launchd com.unixdrop.agent"
+
+    if sys.platform.startswith("linux"):
+        if not shutil.which("systemctl"):
+            return False, "systemctl not found"
         result = subprocess.run(
-            ["launchctl", "list", "com.unixdrop.agent"],
+            ["systemctl", "--user", "is-active", "unixdrop-receiver.service"],
             capture_output=True,
             text=True,
             check=False,
         )
-    except FileNotFoundError:
-        return False
-    return result.returncode == 0
+        active = result.stdout.strip() == "active"
+        detail = result.stdout.strip() or result.stderr.strip() or "inactive"
+        return active, f"systemd unixdrop-receiver.service: {detail}"
+
+    return False, f"unsupported platform: {sys.platform}"
 
 
 def _pending_drop_files() -> int:
@@ -119,20 +141,21 @@ def _vault_status(state: dict) -> list[str]:
 def status_lines() -> list[str]:
     state = _read_state()
     receiver_ok, health_payload, detail = _check_health()
+    service_ok, service_detail = _check_local_node_service()
 
     lines = ["Deskbridge status"]
-    lines.append(f"Mac agent running: {'yes' if _check_mac_agent() else 'no'}")
-    lines.append(f"Linux receiver reachable: {'yes' if receiver_ok else 'no'} ({detail})")
-    lines.append(f"Linux receiver version: {health_payload.get('version', 'unknown')}")
+    lines.append(f"Local node service running: {'yes' if service_ok else 'no'} ({service_detail})")
+    lines.append(f"Peer receiver reachable: {'yes' if receiver_ok else 'no'} ({detail})")
+    lines.append(f"Peer receiver version: {health_payload.get('version', 'unknown')}")
     lines.append(f"auto_open_links: {health_payload.get('auto_open_links', CONFIG.auto_open_links)}")
     lines.append(f"clipboard_mode: {health_payload.get('clipboard_mode', CONFIG.clipboard_mode)}")
-    lines.append(f"drop folder: {CONFIG.drop_dir}")
-    lines.append(f"Linux inbox: {CONFIG.inbox_dir}")
+    lines.append(f"local drop folder: {CONFIG.drop_dir}")
+    lines.append(f"local inbox: {CONFIG.inbox_dir}")
     lines.append(f"pending files in drop folder: {_pending_drop_files()}")
     lines.append(f"last upload result: {state.get('last_upload_result', 'none')}")
 
     lines.extend(_vault_status(state))
-    lines.append("Mouse/keyboard sharing is external. Recommended: Input Leap or Barrier.")
+    lines.append("Mouse/keyboard sharing is managed by Deskflow when deskflow.role is configured.")
     return lines
 
 

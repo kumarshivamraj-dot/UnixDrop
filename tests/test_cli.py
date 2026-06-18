@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from unixdrop.cli import (
+    _cmd_url,
     _drop_destination,
     _send_file_to_receiver,
     _stage_drop_files,
@@ -76,6 +77,29 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 _send_file_to_receiver(Path(tmp), "http://receiver:8765", "secret", 15)
+
+    def test_cmd_url_sends_explicit_url(self) -> None:
+        args = mock.Mock()
+        args.url = "https://example.com"
+        args.no_open = True
+        args.to = "http://peer:8765"
+
+        cfg = mock.Mock(auth_token="secret", receiver_url="http://configured:8765", request_timeout_seconds=15)
+        with (
+            mock.patch("unixdrop.cli.load_config", return_value=cfg),
+            mock.patch("unixdrop.cli.send_url") as send_mock,
+        ):
+            result = _cmd_url(args)
+
+        self.assertEqual(result, 0)
+        send_mock.assert_called_once_with(
+            "https://example.com",
+            no_open=True,
+            receiver_url="http://peer:8765",
+            auth_token="secret",
+            timeout_seconds=15,
+            source="deskbridge-url",
+        )
 
     def test_dropwatch_waits_for_stable_file_before_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

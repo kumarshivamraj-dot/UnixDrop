@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from unixdrop import __version__
-from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, load_config
+from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
 from unixdrop.vault import build_manifest, manifest_to_json, should_skip_relative
 
 
@@ -66,12 +67,12 @@ def _queue_link(url: str, source: str) -> None:
 
 
 def _open_link(url: str) -> tuple[bool, str | None]:
-    command = shutil.which("xdg-open")
+    command = _link_opener_command()
     if not command:
-        return False, "xdg-open not found"
+        return False, "link opener not found"
     try:
         subprocess.Popen(
-            [command, url],
+            command + [url],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -89,6 +90,8 @@ def _hash_text(value: str) -> str:
 
 
 def _clipboard_get_command() -> list[str] | None:
+    if sys.platform == "darwin" and shutil.which("pbpaste"):
+        return ["pbpaste"]
     if shutil.which("wl-paste"):
         return ["wl-paste", "--no-newline"]
     if shutil.which("xclip"):
@@ -99,6 +102,8 @@ def _clipboard_get_command() -> list[str] | None:
 
 
 def _clipboard_set_command() -> list[str] | None:
+    if sys.platform == "darwin" and shutil.which("pbcopy"):
+        return ["pbcopy"]
     if shutil.which("wl-copy"):
         return ["wl-copy"]
     if shutil.which("xclip"):
@@ -178,7 +183,7 @@ def _linux_clipboard_watcher() -> None:
 
             snapshot = _clipboard_snapshot()
             if digest != snapshot.get("hash"):
-                _update_clipboard_state(current, "linux-local")
+                _update_clipboard_state(current, "local")
         except Exception as exc:
             now = time.monotonic()
             if now - last_error_log >= 30:
@@ -214,9 +219,23 @@ def _xdg_open_available() -> bool:
     return shutil.which("xdg-open") is not None
 
 
+def _link_opener_command() -> list[str] | None:
+    if sys.platform == "darwin" and shutil.which("open"):
+        return ["open"]
+    if sys.platform.startswith("linux"):
+        opener = shutil.which("xdg-open")
+        if opener:
+            return [opener]
+    return None
+
+
+def _link_opener_available() -> bool:
+    return _link_opener_command() is not None
+
+
 def _start_deskflow_process() -> subprocess.Popen[str] | None:
-    script = CONFIG.deskflow_linux_start_script
-    if not CONFIG.deskflow_enabled:
+    script = deskflow_start_script(CONFIG, sys.platform)
+    if script is None:
         return None
     if not script.exists():
         _log("warn", f"deskflow integration enabled but script not found: {script}")
@@ -235,7 +254,7 @@ def _start_deskflow_process() -> subprocess.Popen[str] | None:
 
 def _ensure_deskflow_running() -> None:
     global DESKFLOW_PROCESS
-    if not CONFIG.deskflow_enabled:
+    if deskflow_start_script(CONFIG, sys.platform) is None:
         return
     with DESKFLOW_LOCK:
         if DESKFLOW_PROCESS is None:
@@ -599,6 +618,8 @@ class UnixDropHandler(BaseHTTPRequestHandler):
                 "auto_open_links": CONFIG.auto_open_links,
                 "clipboard_mode": CONFIG.clipboard_mode,
                 "xdg_open_available": _xdg_open_available(),
+                "link_opener_available": _link_opener_available(),
+                "link_opener": "open" if sys.platform == "darwin" else "xdg-open",
                 "inbox_writable": _inbox_writable(),
                 "inbox_dir": str(CONFIG.inbox_dir),
             },
@@ -608,13 +629,35 @@ class UnixDropHandler(BaseHTTPRequestHandler):
         return
 
 
-def main() -> None:
-    _ensure_dirs()
-    _ensure_deskflow_running()
-    deskflow_thread = threading.Thread(target=_deskflow_supervisor, daemon=True)
-    deskflow_thread.start()
+def _start_clipboard_watcher() -> threading.Thread:
     watcher = threading.Thread(target=_linux_clipboard_watcher, daemon=True)
     watcher.start()
+    return watcher
+
+
+def start_receiver_in_thread(*, start_clipboard_watcher: bool = True) -> tuple[ThreadingHTTPServer, threading.Thread]:
+    _ensure_dirs()
+    try:
+        server = ThreadingHTTPServer((CONFIG.listen_host, CONFIG.port), UnixDropHandler)
+    except Exception as exc:
+        _log("error", f"failed to start receiver on {CONFIG.listen_host}:{CONFIG.port}: {exc}")
+        raise
+    _log("info", f"listening on {CONFIG.listen_host}:{CONFIG.port}")
+    if start_clipboard_watcher:
+        _start_clipboard_watcher()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def main(*, start_deskflow: bool = True, start_clipboard_watcher: bool = True) -> None:
+    _ensure_dirs()
+    if start_deskflow:
+        _ensure_deskflow_running()
+        deskflow_thread = threading.Thread(target=_deskflow_supervisor, daemon=True)
+        deskflow_thread.start()
+    if start_clipboard_watcher:
+        _start_clipboard_watcher()
     try:
         server = ThreadingHTTPServer((CONFIG.listen_host, CONFIG.port), UnixDropHandler)
     except Exception as exc:

@@ -199,7 +199,24 @@ def _cmd_tab(args: argparse.Namespace) -> int:
     if not is_supported_web_url(url):
         label = app_name or "browser"
         raise SystemExit(f"{label} returned a non-web URL: {url}")
-    send_url(url, no_open=args.no_open)
+    send_url(url, no_open=args.no_open, source="mac-browser-helper")
+    print(url)
+    return 0
+
+
+def _cmd_url(args: argparse.Namespace) -> int:
+    cfg = load_config()
+    url = str(args.url).strip()
+    if not is_supported_web_url(url):
+        raise SystemExit(f"unsupported URL: {url}")
+    send_url(
+        url,
+        no_open=args.no_open,
+        receiver_url=args.to or cfg.receiver_url,
+        auth_token=cfg.auth_token,
+        timeout_seconds=cfg.request_timeout_seconds,
+        source="deskbridge-url",
+    )
     print(url)
     return 0
 
@@ -269,8 +286,8 @@ def _cmd_drop(args: argparse.Namespace) -> int:
     staged = _stage_drop_files(args.files, cfg.drop_dir) if args.files else []
     if staged:
         for destination in staged:
-            print(f"staged for ThinkPad: {destination}")
-        print("Mac agent will transfer staged files to the Linux inbox.")
+            print(f"staged for peer: {destination}")
+        print("UnixDrop node will transfer staged files to the peer inbox.")
 
     if args.open or not staged:
         opened, detail = _open_drop_folder(cfg.drop_dir)
@@ -281,7 +298,7 @@ def _cmd_drop(args: argparse.Namespace) -> int:
             print(f"open folder skipped: {detail}")
 
     if not staged:
-        print("Drag files into this folder; UnixDrop will transfer them to the client.")
+        print("Drag files into this folder; UnixDrop will transfer them to the peer.")
     return 0
 
 
@@ -463,7 +480,7 @@ def _cmd_dropwatch(args: argparse.Namespace) -> int:
 def _cmd_receive(_: argparse.Namespace) -> int:
     from unixdrop.linux_service import main as receiver_main
 
-    receiver_main()
+    receiver_main(start_deskflow=False, start_clipboard_watcher=True)
     return 0
 
 
@@ -474,7 +491,7 @@ def _dropzone_html(drop_dir: Path) -> bytes:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Drop to ThinkPad</title>
+  <title>Drop to Peer</title>
   <style>
     :root {{
       color-scheme: light dark;
@@ -550,9 +567,9 @@ def _dropzone_html(drop_dir: Path) -> bytes:
 </head>
 <body>
   <main>
-    <h1>Drop to ThinkPad</h1>
+    <h1>Drop to Peer</h1>
     <p class="path">{escaped_drop_dir}</p>
-    <div id="dropzone" role="button" tabindex="0" aria-label="Drop files to send to ThinkPad">
+    <div id="dropzone" role="button" tabindex="0" aria-label="Drop files to send to peer">
       <div>
         <div class="title">Drop files here</div>
         <div class="hint">or click to choose files</div>
@@ -766,14 +783,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deskbridge", description="Desk bridge between macOS and Linux")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    tab_parser = subparsers.add_parser("tab", help="Send active browser tab from Mac to Linux")
+    tab_parser = subparsers.add_parser("tab", help="Send active macOS browser tab to peer")
     tab_parser.add_argument(
         "--browser",
         default="auto",
         help="auto, safari, chrome, arc, brave, chromium, edge, vivaldi, opera",
     )
-    tab_parser.add_argument("--no-open", action="store_true", help="Queue link on Linux instead of opening")
+    tab_parser.add_argument("--no-open", action="store_true", help="Queue link on peer instead of opening")
     tab_parser.set_defaults(func=_cmd_tab)
+
+    url_parser = subparsers.add_parser("url", help="Send an explicit URL to the peer")
+    url_parser.add_argument("url", help="http or https URL to send")
+    url_parser.add_argument("--no-open", action="store_true", help="Queue link on peer instead of opening")
+    url_parser.add_argument("--to", help="Receiver base URL, defaults to receiver_url from config")
+    url_parser.set_defaults(func=_cmd_url)
 
     status_parser = subparsers.add_parser("status", help="Show desk bridge status")
     status_parser.set_defaults(func=_cmd_status)
@@ -786,7 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui_parser.add_argument("--once", action="store_true", help="Render one snapshot and exit")
     tui_parser.set_defaults(func=_cmd_tui)
 
-    drop_parser = subparsers.add_parser("drop", help="Open or stage files into the ThinkPad drop folder")
+    drop_parser = subparsers.add_parser("drop", help="Open or stage files into the peer drop folder")
     drop_parser.add_argument("files", nargs="*", help="Files to copy into the drop folder")
     drop_parser.add_argument("--open", action="store_true", help="Open the drop folder after staging files")
     drop_parser.set_defaults(func=_cmd_drop)
@@ -802,12 +825,12 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Watch a local folder and send files to another machine.\n\n"
-            "ThinkPad to Mac drop folder:\n"
-            "  1. On the Mac, run:\n"
+            "Reverse-direction drop folder:\n"
+            "  1. On the receiving machine, run:\n"
             "     ./deskbridge receive\n\n"
-            "  2. On the ThinkPad, run:\n"
-            "     ./deskbridge dropwatch --folder ~/Drop\\ to\\ Mac --to http://<mac-ip>:8765\n\n"
-            "  3. Drop files into ~/Drop to Mac on the ThinkPad.\n"
+            "  2. On the sending machine, run:\n"
+            "     ./deskbridge dropwatch --folder ~/Drop\\ to\\ Peer --to http://<peer-ip>:8765\n\n"
+            "  3. Drop files into the watched folder.\n"
         ),
     )
     dropwatch_parser.add_argument("--folder", help="Folder to watch, defaults to drop.folder from config")
@@ -824,7 +847,7 @@ def build_parser() -> argparse.ArgumentParser:
     receive_parser = subparsers.add_parser("receive", help="Run a UnixDrop file receiver on this machine")
     receive_parser.set_defaults(func=_cmd_receive)
 
-    dropzone_parser = subparsers.add_parser("dropzone", help="Run a browser drag-and-drop box for ThinkPad files")
+    dropzone_parser = subparsers.add_parser("dropzone", help="Run a browser drag-and-drop box for peer files")
     dropzone_parser.add_argument("--port", type=int, default=0, help="Local port to bind, 0 chooses a free port")
     dropzone_parser.add_argument("--no-open", dest="open", action="store_false", help="Do not open the browser")
     dropzone_parser.set_defaults(func=_cmd_dropzone, open=True)

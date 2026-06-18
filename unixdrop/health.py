@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from urllib import request
@@ -66,6 +67,8 @@ def _check_systemd_local() -> tuple[bool, str]:
 
 
 def _check_browser_script() -> tuple[bool, str]:
+    if sys.platform != "darwin":
+        return True, "skipped (macOS active tab only)"
     if not shutil.which("osascript"):
         return False, "osascript not found"
     result = subprocess.run(
@@ -84,9 +87,9 @@ def health_lines() -> list[str]:
     try:
         payload = _request_json("/health", auth=False)
         receiver_reachable = bool(payload.get("ok"))
-        lines.append(_result("HTTP receiver reachable", receiver_reachable, "reachable"))
+        lines.append(_result("Peer HTTP receiver reachable", receiver_reachable, "reachable"))
     except Exception as exc:
-        lines.append(_result("HTTP receiver reachable", False, str(exc)))
+        lines.append(_result("Peer HTTP receiver reachable", False, str(exc)))
 
     if receiver_reachable:
         try:
@@ -125,33 +128,34 @@ def health_lines() -> list[str]:
     if receiver_reachable:
         try:
             payload = _request_json("/api/health/write-check", method="POST")
-            lines.append(_result("Linux inbox write permission", bool(payload.get("ok")), "writable" if payload.get("ok") else "not writable"))
+            lines.append(_result("peer inbox write permission", bool(payload.get("ok")), "writable" if payload.get("ok") else "not writable"))
         except Exception as exc:
-            lines.append(_result("Linux inbox write permission", False, str(exc)))
+            lines.append(_result("peer inbox write permission", False, str(exc)))
     else:
-        lines.append(_result("Linux inbox write permission", False, "skipped (receiver unreachable)"))
+        lines.append(_result("peer inbox write permission", False, "skipped (receiver unreachable)"))
 
     if receiver_reachable:
         try:
             payload = _request_json("/api/diagnostics")
-            xdg_ok = bool(payload.get("xdg_open_available"))
-            lines.append(_result("xdg-open availability on Linux", xdg_ok, "available" if xdg_ok else "missing"))
+            opener_ok = bool(payload.get("link_opener_available", payload.get("xdg_open_available")))
+            opener = payload.get("link_opener", "link opener")
+            lines.append(_result("peer link opener availability", opener_ok, f"{opener} available" if opener_ok else f"{opener} missing"))
         except Exception as exc:
-            lines.append(_result("xdg-open availability on Linux", False, str(exc)))
+            lines.append(_result("peer link opener availability", False, str(exc)))
     else:
-        lines.append(_result("xdg-open availability on Linux", False, "skipped (receiver unreachable)"))
+        lines.append(_result("peer link opener availability", False, "skipped (receiver unreachable)"))
 
     browser_ok, browser_detail = _check_browser_script()
-    lines.append(_result("macOS browser tab script", browser_ok, browser_detail))
+    lines.append(_result("local active-tab script", browser_ok, browser_detail))
 
     drop_exists = Path(CONFIG.drop_dir).exists()
     lines.append(_result("drop folder exists", drop_exists, str(CONFIG.drop_dir)))
 
     launchd_ok, launchd_detail = _check_launchd()
-    lines.append(_result("launchd service status", launchd_ok, launchd_detail))
+    lines.append(_result("launchd node service status", launchd_ok, launchd_detail))
 
     systemd_ok, systemd_detail = _check_systemd_local()
-    lines.append(_result("systemd --user receiver status (local check)", systemd_ok, systemd_detail))
+    lines.append(_result("systemd --user node service status", systemd_ok, systemd_detail))
 
     return lines
 

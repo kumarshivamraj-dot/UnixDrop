@@ -4,8 +4,9 @@ UnixDrop is a small **desk bridge** between a MacBook and a Linux ThinkPad.
 
 The architecture stays simple:
 
-- **Mac Agent** pushes clipboard text, active browser tabs, and dropped files.
-- **Linux Receiver** accepts data over HTTP and stores/opens it.
+- **UnixDrop Node** runs on both machines.
+- Each node accepts incoming files/links/clipboard over HTTP and watches a local drop folder to send to its peer.
+- Deskflow server/client roles are configured separately, so either MacBook or ThinkPad can own the keyboard/mouse.
 
 This project does **not** implement mouse/keyboard sharing directly. Use Deskflow (or another software KVM) for HID.
 
@@ -20,15 +21,15 @@ Make both machines feel like one desk:
 ## Features
 
 - Shared clipboard bridge with explicit direction modes.
-- Active tab send from macOS to Linux.
-- Drag/drop style file sending from macOS drop folder to Linux inbox.
-- Linux inbox conflict-safe writes.
+- Active macOS tab send plus explicit URL send from either machine.
+- Drag/drop style file sending from either machine to its configured peer.
+- Inbox conflict-safe writes on either receiver.
 - Health and status commands.
 - Optional Obsidian vault sync (kept separate from desk bridge core).
 
 ## Install
 
-### Linux receiver
+### Linux node
 
 1. Put this repo on Linux.
 2. Create `~/.config/unixdrop/config.json` from `config.example.json`.
@@ -39,11 +40,11 @@ Make both machines feel like one desk:
 systemctl --user enable --now unixdrop-receiver.service
 ```
 
-### macOS agent
+### macOS node
 
 1. Put this repo on macOS.
 2. Create `~/.config/unixdrop/config.json` from `config.example.json`.
-3. Install agent:
+3. Install service:
 
 ```bash
 ./scripts/install_mac_agent.sh
@@ -59,6 +60,7 @@ Run from repo root:
 ./deskbridge tab
 ./deskbridge tab --browser safari
 ./deskbridge tab --no-open
+./deskbridge url https://example.com
 ./deskbridge status
 ./deskbridge health
 ./deskbridge tui
@@ -75,7 +77,7 @@ TUI keys:
 - `q`: quit
 - `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
 - `d`: start Deskflow using configured start script
-- `o`: open the Drop to ThinkPad folder
+- `o`: open the local drop folder
 
 If Deskflow gets stuck in duplicate client loops (`already connected`), run:
 
@@ -183,24 +185,27 @@ If you want `launchctl`/`systemctl` for UnixDrop to also manage Deskflow startup
 
 ```json
 "deskflow": {
-  "enabled": true,
-  "mac_start_script": "~/.config/deskflow/start-deskflow-server.sh",
-  "linux_start_script": "~/.config/deskflow/start-deskflow-client.sh"
+  "role": "server",
+  "server_start_script": "~/.config/deskflow/start-deskflow-server.sh",
+  "client_start_script": "~/.config/deskflow/start-deskflow-client.sh"
 }
 ```
 
-Behavior:
+Use `"role": "client"` on the Deskflow client and `"role": "off"` to let UnixDrop ignore Deskflow.
 
-- macOS `unixdrop.mac_agent` starts and supervises `mac_start_script`.
-- Linux `unixdrop.linux_service` starts and supervises `linux_start_script`.
+Backward-compatible keys still load:
+
+- `deskflow.enabled`
+- `deskflow.mac_start_script`
+- `deskflow.linux_start_script`
 
 ## Clipboard Modes
 
 Use `clipboard.mode` (or top-level `clipboard_mode`):
 
 - `off`: disable clipboard sync
-- `mac_to_linux`: Mac clipboard pushes to Linux
-- `linux_to_mac`: Linux clipboard pulls to Mac
+- `mac_to_linux`: local sender push behavior from the original Mac-to-Linux workflow
+- `linux_to_mac`: peer pull behavior from the original Linux-to-Mac workflow
 - `two_way`: both directions with loop protection
 
 Rules:
@@ -218,16 +223,18 @@ Old keys still work:
 
 They are mapped to `clipboard_mode` with a deprecation warning.
 
-## Drop to ThinkPad Workflow
+## Drop to Peer Workflow
 
 Defaults:
 
-- macOS drop folder: `~/Drop to ThinkPad`
-- Linux inbox: `~/Inbox/MacDrop`
+- local drop folder: `~/Drop to ThinkPad`
+- local inbox: `~/Inbox/MacDrop`
+
+You can override these per machine in config, for example `~/Drop to Mac` on the ThinkPad and `~/Inbox/ThinkPadDrop` on the Mac.
 
 Behavior:
 
-- `deskbridge tui` shows a Drop to ThinkPad section with the folder, Linux inbox, pending file count, and last upload result.
+- `deskbridge tui` shows the local drop folder, local inbox, pending file count, and last upload result.
 - Press `o` in the TUI or run `deskbridge drop` to open the drop folder.
 - Run `deskbridge dropzone` for a local browser page with a boxed drag-and-drop target.
 - Drag files into the drop folder, or stage files from a terminal:
@@ -238,26 +245,26 @@ Behavior:
   ```bash
   ./deskbridge send ~/Downloads/report.pdf --to http://<receiver-ip>:8765
   ```
-- Run a receiver on the other machine when you want files to flow back:
+- Run a receiver manually on a machine:
   ```bash
   ./deskbridge receive
   ```
 - Create a watched folder on the current machine that sends to another receiver:
   ```bash
-  ./deskbridge dropwatch --folder ~/Drop\ to\ Mac --to http://<mac-ip>:8765
+  ./deskbridge dropwatch --folder ~/Drop\ to\ Peer --to http://<peer-ip>:8765
   ```
-- Mac agent watches drop folder.
+- The UnixDrop node watches the configured drop folder.
 - Upload waits until file appears stable (not still writing).
 - Max upload size defaults to `500 MB` (`max_file_mb`).
-- Linux preserves filename.
-- If target exists, Linux writes:
+- The receiver preserves filename.
+- If target exists, the receiver writes:
   - `file.txt`
   - `file (conflict YYYY-MM-DD HH-MM-SS).txt`
 - Local files are kept by default (`delete_after_send = false`).
 
 ## Tab Send Workflow
 
-`deskbridge tab` reads active URL from supported browsers:
+`deskbridge tab` reads the active URL from supported macOS browsers:
 
 - Safari
 - Google Chrome
@@ -268,34 +275,41 @@ Behavior:
 - Vivaldi
 - Opera
 
-Linux behavior:
+For either machine, send an explicit URL:
 
-- If `auto_open_links=true` and no `--no-open`, URL opens via `xdg-open`.
+```bash
+./deskbridge url https://example.com
+./deskbridge url https://example.com --to http://<peer-ip>:8765
+```
+
+Receiver behavior:
+
+- If `auto_open_links=true` and no `--no-open`, URL opens via `open` on macOS or `xdg-open` on Linux.
 - Otherwise URL is appended to `~/Inbox/MacDrop/links.md`.
 
 ## Status and Health
 
 `deskbridge status` shows:
 
-- macOS agent running
-- Linux receiver reachable
-- receiver version
+- local node service status
+- peer receiver reachability
+- peer receiver version
 - `auto_open_links`
 - `clipboard_mode`
-- drop folder and inbox paths
+- local drop folder and inbox paths
 - pending drop files
 - last upload result
 - Obsidian enabled + vault drift summary
-- Input Leap/Barrier note
+- Deskflow management note
 
 `deskbridge health` checks:
 
-- receiver HTTP reachability
+- peer HTTP reachability
 - auth ping endpoint
 - clipboard roundtrip (when enabled)
-- Linux inbox write test
-- `xdg-open` availability on Linux
-- macOS browser script availability
+- peer inbox write test
+- peer link opener availability
+- local active-tab script availability
 - drop folder existence
 - launchd/systemd status checks (when available)
 
@@ -312,8 +326,8 @@ Use the `obsidian` section:
 
 Current behavior remains intentionally simple:
 
-- bidirectional sync via Linux receiver
-- conflict copies on Mac
+- bidirectional sync via the configured peer receiver
+- conflict copies on the local sender
 - excludes cache/workspace paths
 - no delete propagation
 
@@ -324,15 +338,16 @@ Mouse/keyboard sharing is external to UnixDrop.
 Recommended setup:
 
 - install Deskflow (or Input Leap)
-- MacBook as server
-- ThinkPad as client
+- choose the machine with the active keyboard/mouse as the Deskflow server
+- configure the other machine as the Deskflow client
+- set matching `deskflow.role` values in each UnixDrop config if the node service should supervise Deskflow
 - keep UnixDrop focused on clipboard/tab/file workflows
 
 ## Safety Notes
 
 - No file execution on receive.
 - No automatic opening of received files.
-- Only URLs can auto-open (via `xdg-open`) when enabled.
+- Only URLs can auto-open (`open` on macOS, `xdg-open` on Linux) when enabled.
 - File uploads are size-limited and filename-sanitized.
 
 -- Todo

@@ -13,5 +13,5 @@ sed \
 
 launchctl unload "${TARGET_FILE}" >/dev/null 2>&1 || true
 
-echo "Installed ${TARGET_FILE}"
+echo "Installed UnixDrop node LaunchAgent: ${TARGET_FILE}"
 echo "Next: launchctl load ${TARGET_FILE}"

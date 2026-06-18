@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from unixdrop.config import DEFAULT_CONFIG_PATH, ENV_CONFIG_PATH, load_config
+from unixdrop.config import DEFAULT_CONFIG_PATH, ENV_CONFIG_PATH, deskflow_start_script, load_config
 from unixdrop.health import health_lines
 from unixdrop.status import status_lines
 
@@ -238,9 +238,9 @@ def _sync_receiver_endpoint(
 
 def _start_deskflow_now() -> tuple[bool, str]:
     cfg = load_config()
-    script = cfg.deskflow_linux_start_script
-    if sys.platform == "darwin":
-        script = cfg.deskflow_mac_start_script
+    script = deskflow_start_script(cfg, sys.platform)
+    if script is None:
+        return False, "deskflow role is off"
     if not script.exists():
         return False, f"deskflow start script missing: {script}"
     if not os.access(script, os.X_OK):
@@ -279,35 +279,36 @@ def _local_tcp_open(host: str, port: int) -> bool:
         return False
 
 
-def _start_linux_receiver_now() -> tuple[bool, str]:
-    if not sys.platform.startswith("linux"):
-        return True, "linux receiver autostart skipped (non-linux)"
-
+def _start_local_receiver_now() -> tuple[bool, str]:
     cfg = load_config()
     receiver_port = int(cfg.port)
     if _local_tcp_open("127.0.0.1", receiver_port):
-        return True, f"linux receiver already listening on 127.0.0.1:{receiver_port}"
+        return True, f"local receiver already listening on 127.0.0.1:{receiver_port}"
 
-    script = _project_dir() / "scripts" / "run_linux_receiver.sh"
-    if not script.exists():
-        return False, f"linux receiver script missing: {script}"
-    if not os.access(script, os.X_OK):
-        return False, f"linux receiver script not executable: {script}"
+    env = os.environ.copy()
+    project_dir = _project_dir()
+    env["PYTHONPATH"] = f"{project_dir}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(project_dir)
     try:
         proc = subprocess.Popen(
-            [str(script)],
+            [sys.executable, "-m", "unixdrop.linux_service"],
+            cwd=str(project_dir),
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        return True, f"linux receiver start requested (pid={proc.pid})"
+        return True, f"local receiver start requested (pid={proc.pid})"
     except Exception as exc:
-        return False, f"linux receiver start failed: {exc}"
+        return False, f"local receiver start failed: {exc}"
+
+
+def _start_linux_receiver_now() -> tuple[bool, str]:
+    return _start_local_receiver_now()
 
 
 def _restart_deskflow_client_now() -> tuple[bool, str]:
     cfg = load_config()
-    script = cfg.deskflow_linux_start_script
+    script = cfg.deskflow_client_start_script
     if not script.exists():
         return False, f"deskflow client start script missing: {script}"
     if not os.access(script, os.X_OK):
@@ -342,18 +343,18 @@ def _render(
     )
     print("")
 
-    receiver = status.get("linux receiver reachable", "unknown")
+    receiver = status.get("peer receiver reachable", "unknown")
     clipboard_mode = status.get("clipboard_mode", "unknown")
-    deskflow_hint = "managed by unixdrop" if status.get("mac agent running", "no").startswith("yes") else "unknown"
+    deskflow_hint = "managed by unixdrop" if status.get("local node service running", "no").startswith("yes") else "unknown"
     print(f"Receiver: {receiver}")
     print(f"Clipboard mode: {clipboard_mode}")
     print(f"Deskflow: {deskflow_hint}")
     print(f"Message: {message}")
     print("")
 
-    print("Drop to ThinkPad:")
-    print(f"  folder: {status.get('drop folder', 'unknown')}")
-    print(f"  Linux inbox: {status.get('linux inbox', 'unknown')}")
+    print("Drop to peer:")
+    print(f"  folder: {status.get('local drop folder', 'unknown')}")
+    print(f"  local inbox: {status.get('local inbox', 'unknown')}")
     print(f"  pending: {status.get('pending files in drop folder', 'unknown')}")
     print(f"  last upload: {status.get('last upload result', 'none')}")
     print("")
@@ -367,9 +368,8 @@ def _render(
 def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
     interval = max(interval_seconds, 0.5)
     message = "ready"
-    receiver_ok, receiver_detail = _start_linux_receiver_now()
-    if sys.platform.startswith("linux"):
-        message = receiver_detail if receiver_ok else f"warning: {receiver_detail}"
+    receiver_ok, receiver_detail = _start_local_receiver_now()
+    message = receiver_detail if receiver_ok else f"warning: {receiver_detail}"
     with _raw_stdin():
         while True:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -393,7 +393,7 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                     receiver_override = None
                     prefix = "saved endpoints"
                 receiver_input = _prompt_line(
-                    "Linux receiver IP/host for UnixDrop (blank=same as first server host): "
+                    "Peer receiver IP/host for UnixDrop (blank=same as first server host): "
                 ).strip()
                 if receiver_input:
                     receiver_override = receiver_input

@@ -8,7 +8,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
-from unixdrop.config import load_config, parse_clipboard_mode
+from unixdrop.config import deskflow_start_script, load_config, parse_clipboard_mode, parse_deskflow_role
 
 
 class ConfigTests(unittest.TestCase):
@@ -29,6 +29,14 @@ class ConfigTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_clipboard_mode("invalid")
+
+    def test_deskflow_role_parser(self) -> None:
+        self.assertEqual(parse_deskflow_role("off"), "off")
+        self.assertEqual(parse_deskflow_role("SERVER"), "server")
+        self.assertEqual(parse_deskflow_role("client"), "client")
+
+        with self.assertRaises(ValueError):
+            parse_deskflow_role("invalid")
 
     def test_old_clipboard_keys_migrate_to_mode_and_warn(self) -> None:
         config_path = self._write_temp_config(
@@ -65,6 +73,9 @@ class ConfigTests(unittest.TestCase):
                 "receiver_url": "http://127.0.0.1:8765",
                 "deskflow": {
                     "enabled": True,
+                    "role": "client",
+                    "server_start_script": "~/custom/start-server.sh",
+                    "client_start_script": "~/custom/start-client.sh",
                     "mac_start_script": "~/custom/start-mac.sh",
                     "linux_start_script": "~/custom/start-linux.sh",
                 },
@@ -72,8 +83,26 @@ class ConfigTests(unittest.TestCase):
         )
         cfg = load_config(config_path)
         self.assertTrue(cfg.deskflow_enabled)
+        self.assertEqual(cfg.deskflow_role, "client")
+        self.assertTrue(str(cfg.deskflow_server_start_script).endswith("custom/start-server.sh"))
+        self.assertTrue(str(cfg.deskflow_client_start_script).endswith("custom/start-client.sh"))
         self.assertTrue(str(cfg.deskflow_mac_start_script).endswith("custom/start-mac.sh"))
         self.assertTrue(str(cfg.deskflow_linux_start_script).endswith("custom/start-linux.sh"))
+
+    def test_deskflow_role_selects_start_script(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "http://127.0.0.1:8765",
+                "deskflow": {
+                    "role": "server",
+                    "server_start_script": "~/custom/server.sh",
+                    "client_start_script": "~/custom/client.sh",
+                },
+            }
+        )
+        cfg = load_config(config_path)
+        self.assertTrue(str(deskflow_start_script(cfg, "linux")).endswith("custom/server.sh"))
 
 
 if __name__ == "__main__":

@@ -3,18 +3,32 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from urllib import parse, request
 
-from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, load_config
+from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
 from unixdrop.vault import build_manifest, file_sha256, should_skip_relative
 
 
 CONFIG = load_config()
 STATE_FILE = CONFIG.state_dir / "mac_state.json"
+
+
+def _default_state() -> dict:
+    return {
+        "files": {},
+        "drop_pending": {},
+        "vault": {},
+        "last_upload_result": "none",
+        "last_local_clipboard_hash": "",
+        "last_remote_clipboard_hash": "",
+        "last_remote_applied_hash": "",
+    }
 
 
 def _ensure_dirs() -> None:
@@ -23,9 +37,9 @@ def _ensure_dirs() -> None:
 
 
 def _start_deskflow_process() -> subprocess.Popen[str] | None:
-    if not CONFIG.deskflow_enabled:
+    script = deskflow_start_script(CONFIG, sys.platform)
+    if script is None:
         return None
-    script = CONFIG.deskflow_mac_start_script
     if not script.exists():
         print(f"Deskflow integration enabled but script not found: {script}")
         return None
@@ -42,7 +56,7 @@ def _start_deskflow_process() -> subprocess.Popen[str] | None:
 
 
 def _ensure_deskflow_running(process: subprocess.Popen[str] | None) -> subprocess.Popen[str] | None:
-    if not CONFIG.deskflow_enabled:
+    if deskflow_start_script(CONFIG, sys.platform) is None:
         return None
     if process is None:
         return _start_deskflow_process()
@@ -55,27 +69,27 @@ def _ensure_deskflow_running(process: subprocess.Popen[str] | None) -> subproces
 
 def _load_state() -> dict:
     if not STATE_FILE.exists():
-        return {
-            "files": {},
-            "drop_pending": {},
-            "vault": {},
-            "last_upload_result": "none",
-            "last_local_clipboard_hash": "",
-            "last_remote_clipboard_hash": "",
-            "last_remote_applied_hash": "",
-        }
-    return json.loads(STATE_FILE.read_text())
+        return _default_state()
+    try:
+        loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _default_state()
+    return loaded if isinstance(loaded, dict) else _default_state()
 
 
 def _save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True))
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = STATE_FILE.with_name(f".{STATE_FILE.name}.tmp")
+    tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp_path, STATE_FILE)
 
 
 def _clipboard_text() -> str:
-    import subprocess
-
+    command = _clipboard_get_command()
+    if not command:
+        return ""
     result = subprocess.run(
-        ["pbpaste"],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -86,15 +100,40 @@ def _clipboard_text() -> str:
 
 
 def _set_clipboard_text(text: str) -> None:
-    import subprocess
-
+    command = _clipboard_set_command()
+    if not command:
+        return
     subprocess.run(
-        ["pbcopy"],
+        command,
         input=text,
         text=True,
         capture_output=True,
         check=False,
     )
+
+
+def _clipboard_get_command() -> list[str] | None:
+    if sys.platform == "darwin" and shutil.which("pbpaste"):
+        return ["pbpaste"]
+    if shutil.which("wl-paste"):
+        return ["wl-paste", "--no-newline"]
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard", "-o"]
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--output"]
+    return None
+
+
+def _clipboard_set_command() -> list[str] | None:
+    if sys.platform == "darwin" and shutil.which("pbcopy"):
+        return ["pbcopy"]
+    if shutil.which("wl-copy"):
+        return ["wl-copy"]
+    if shutil.which("xclip"):
+        return ["xclip", "-selection", "clipboard"]
+    if shutil.which("xsel"):
+        return ["xsel", "--clipboard", "--input"]
+    return None
 
 
 def _hash_text(value: str) -> str:
@@ -147,8 +186,8 @@ def _sync_clipboard_push(state: dict) -> None:
     if digest == state.get("last_remote_applied_hash"):
         return
 
-    _post_json("/api/clipboard", {"text": current, "source": "mac-local"})
-    print("Clipboard Mac -> Linux")
+    _post_json("/api/clipboard", {"text": current, "source": "local"})
+    print("Clipboard local -> peer")
 
 
 def _pull_remote_clipboard(state: dict) -> None:
@@ -176,7 +215,7 @@ def _pull_remote_clipboard(state: dict) -> None:
     _set_clipboard_text(remote_text)
     state["last_local_clipboard_hash"] = remote_hash
     state["last_remote_applied_hash"] = remote_hash
-    print("Clipboard Linux -> Mac")
+    print("Clipboard peer -> local")
 
 
 def _sync_drop_files(state: dict) -> None:
@@ -224,7 +263,7 @@ def _sync_drop_files(state: dict) -> None:
         state["last_upload_result"] = (
             f"uploaded {file_path.name} ({size} bytes) at {datetime.now().isoformat(timespec='seconds')}"
         )
-        print(f"Uploaded to Linux inbox: {file_path.name} -> {remote_path}")
+        print(f"Uploaded to peer inbox: {file_path.name} -> {remote_path}")
 
         if CONFIG.delete_after_send:
             file_path.unlink(missing_ok=True)
@@ -344,16 +383,17 @@ def _sync_obsidian_vault(state: dict) -> None:
         known[relative_path] = file_sha256(local_path)
 
 
-def main() -> None:
+def main(*, start_deskflow: bool = True) -> None:
     _ensure_dirs()
     state = _load_state()
-    deskflow_process = _start_deskflow_process()
+    deskflow_process = _start_deskflow_process() if start_deskflow else None
     last_file_scan = 0.0
     last_vault_scan = 0.0
 
     while True:
         try:
-            deskflow_process = _ensure_deskflow_running(deskflow_process)
+            if start_deskflow:
+                deskflow_process = _ensure_deskflow_running(deskflow_process)
             _sync_clipboard_push(state)
             _pull_remote_clipboard(state)
 

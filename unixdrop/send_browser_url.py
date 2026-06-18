@@ -133,20 +133,28 @@ def is_supported_web_url(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def send_url(url: str, no_open: bool = False) -> None:
-    target = CONFIG.receiver_url.rstrip("/") + "/api/link"
-    body = json.dumps({"url": url, "source": "mac-browser-helper", "no_open": no_open}).encode("utf-8")
+def send_url(
+    url: str,
+    no_open: bool = False,
+    *,
+    receiver_url: str | None = None,
+    auth_token: str | None = None,
+    timeout_seconds: int | None = None,
+    source: str = "browser-helper",
+) -> None:
+    target = (receiver_url or CONFIG.receiver_url).rstrip("/") + "/api/link"
+    body = json.dumps({"url": url, "source": source, "no_open": no_open}).encode("utf-8")
     req = request.Request(
         target,
         data=body,
         method="POST",
         headers={
-            "Authorization": f"Bearer {CONFIG.auth_token}",
+            "Authorization": f"Bearer {auth_token or CONFIG.auth_token}",
             "Content-Type": "application/json",
         },
     )
     try:
-        with request.urlopen(req, timeout=CONFIG.request_timeout_seconds):
+        with request.urlopen(req, timeout=timeout_seconds or CONFIG.request_timeout_seconds):
             return
     except HTTPError as exc:
         raise SystemExit(
@@ -156,15 +164,15 @@ def send_url(url: str, no_open: bool = False) -> None:
     except URLError as exc:
         reason = str(exc.reason)
         raise SystemExit(
-            f"could not reach Linux receiver at {target}: {reason}. "
+            f"could not reach peer receiver at {target}: {reason}. "
             "Start/verify receiver with `./deskbridge status` and `./deskbridge health`."
         ) from exc
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Send active macOS browser tab to Linux receiver")
+    parser = argparse.ArgumentParser(description="Send active macOS browser tab to peer receiver")
     parser.add_argument("--browser", default="auto", help="auto, safari, chrome, arc, brave, chromium, edge, vivaldi, opera")
-    parser.add_argument("--no-open", action="store_true", help="queue link on Linux instead of opening immediately")
+    parser.add_argument("--no-open", action="store_true", help="queue link on peer instead of opening immediately")
     args = parser.parse_args(argv)
 
     app_name, url = current_browser_context(args.browser)
@@ -173,7 +181,7 @@ def main(argv: list[str] | None = None) -> None:
     if not is_supported_web_url(url):
         label = app_name or "browser"
         raise SystemExit(f"{label} returned a non-web URL: {url}")
-    send_url(url, no_open=args.no_open)
+    send_url(url, no_open=args.no_open, source="mac-browser-helper")
     print(url)
 
 

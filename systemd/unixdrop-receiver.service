@@ -1,12 +1,12 @@
 [Unit]
-Description=UnixDrop receiver service
+Description=UnixDrop node service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=__PROJECT_DIR__
-ExecStart=/usr/bin/env python3 -m unixdrop.linux_service
+ExecStart=/usr/bin/env python3 -m unixdrop.node
 Restart=always
 RestartSec=3
 
