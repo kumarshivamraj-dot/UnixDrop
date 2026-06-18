@@ -75,7 +75,8 @@ Run from repo root:
 TUI keys:
 
 - `s`: quick setup (Mac server, Linux client, automatic discovery, two-way clipboard)
-- `q`: quit
+- `q`: close only the dashboard; background services keep running
+- `x`: stop all UnixDrop, Deskflow, discovery, and receiver background processes
 - `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
 - `d`: start Deskflow using configured start script
 - `r`: reverse Deskflow role using the opposite configured start script

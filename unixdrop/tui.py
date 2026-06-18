@@ -137,7 +137,7 @@ def _apply_client_server_hosts(server_hosts: str) -> tuple[bool, str]:
     return False, f"failed to save endpoints: {detail}"
 
 
-def _update_quick_setup_config(role: str) -> tuple[bool, str]:
+def _update_quick_setup_config(role: str, peer_name: str = "") -> tuple[bool, str]:
     config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
     if not config_path.exists():
         return False, f"unixdrop config missing: {config_path}"
@@ -155,11 +155,23 @@ def _update_quick_setup_config(role: str) -> tuple[bool, str]:
                 "client_start_script": "~/.config/deskflow/start-deskflow-client.sh",
             }
         )
+        if peer_name.strip():
+            deskflow["peer_name"] = peer_name.strip()
         raw["deskflow"] = deskflow
         config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
     except Exception as exc:
         return False, f"failed to update unixdrop config: {exc}"
     return True, f"saved {role} role and enabled two-way clipboard"
+
+
+def _saved_deskflow_peer_name() -> str:
+    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
+    return str(deskflow.get("peer_name", "")).strip()
 
 
 def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
@@ -168,7 +180,9 @@ def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
         role = "server"
         client_name = peer_hostname.strip()
         if not client_name or client_name == "unknown":
-            client_name = "thinkpad"
+            client_name = _saved_deskflow_peer_name()
+        if not client_name:
+            return False, "peer name is not available yet; start UnixDrop on the Linux laptop first"
         command = [
             str(script),
             "--role",
@@ -199,7 +213,9 @@ def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
     ok, detail = _run_command(command)
     if not ok:
         return False, f"Deskflow setup failed: {detail}"
-    config_ok, config_detail = _update_quick_setup_config(role)
+    config_ok, config_detail = _update_quick_setup_config(
+        role, client_name if role == "server" else ""
+    )
     if not config_ok:
         return False, config_detail
     started, start_detail = _start_deskflow_now()
@@ -499,6 +515,92 @@ def _disable_standalone_deskflow_autostarts() -> tuple[bool, str]:
     return False, f"unsupported platform: {sys.platform}"
 
 
+def _set_deskflow_off() -> tuple[bool, str]:
+    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
+        deskflow["enabled"] = False
+        deskflow["role"] = "off"
+        raw["deskflow"] = deskflow
+        config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:
+        return False, f"failed to disable Deskflow in config: {exc}"
+    return True, "Deskflow disabled in config"
+
+
+def _stop_all_now() -> tuple[bool, str]:
+    errors: list[str] = []
+
+    config_ok, config_detail = _set_deskflow_off()
+    if not config_ok:
+        errors.append(config_detail)
+
+    if sys.platform == "darwin":
+        plists = [
+            Path("~/Library/LaunchAgents/com.unixdrop.agent.plist").expanduser(),
+            Path("~/Library/LaunchAgents/com.unixdrop.deskflow.server.plist").expanduser(),
+            Path("~/Library/LaunchAgents/com.unixdrop.deskflow.client.plist").expanduser(),
+        ]
+        for plist in plists:
+            if not plist.exists():
+                continue
+            result = subprocess.run(
+                ["launchctl", "unload", str(plist)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode not in (0, 3):
+                detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+                errors.append(f"could not unload {plist.name}: {detail}")
+    elif sys.platform.startswith("linux"):
+        for service in (
+            "unixdrop-receiver.service",
+            "deskflow-server.service",
+            "deskflow-client.service",
+        ):
+            result = subprocess.run(
+                ["systemctl", "--user", "disable", "--now", service],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            stderr = result.stderr.strip().lower()
+            if result.returncode != 0 and "does not exist" not in stderr and "not loaded" not in stderr:
+                errors.append(f"could not stop {service}: {result.stderr.strip() or result.stdout.strip()}")
+    else:
+        errors.append(f"unsupported platform: {sys.platform}")
+
+    patterns = (
+        "deskflow-server",
+        "deskflow-client",
+        "deskflow-core.*server",
+        "deskflow-core.*client",
+        "unixdrop/discovery.py.*serve",
+        "-m unixdrop.linux_service",
+        "-m unixdrop.node",
+    )
+    for pattern in patterns:
+        try:
+            result = subprocess.run(
+                ["pkill", "-KILL", "-f", "--", pattern],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            errors.append("pkill is not available")
+            break
+        if result.returncode not in (0, 1):
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+            errors.append(f"could not stop process matching {pattern}: {detail}")
+
+    if errors:
+        return False, "; ".join(errors)
+    return True, "UnixDrop, Deskflow, discovery, and receivers stopped"
+
+
 def _swap_deskflow_role_now() -> tuple[bool, str]:
     current_role = _current_deskflow_role()
     if current_role is None:
@@ -535,7 +637,7 @@ def _render(
     print(_cyan("Deskbridge TUI"))
     print(
         f"Updated: {snapshot_time} | refresh={interval:.1f}s | "
-        "keys: s quick setup, q quit, e endpoints, d start deskflow, r reverse, o open drop"
+        "keys: s setup, q close UI, x stop all, e endpoints, d deskflow, r reverse, o drop"
     )
     print("")
 
@@ -610,6 +712,11 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                 ok, detail = _quick_setup_deskflow(status.get("peer hostname", ""))
                 message = detail if ok else f"error: {detail}"
                 continue
+            if key.lower() == "x":
+                ok, detail = _stop_all_now()
+                _clear()
+                print(_green(detail) if ok else _red(f"Shutdown incomplete: {detail}"))
+                return 0 if ok else 1
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()
                 message = detail if ok else f"error: {detail}"

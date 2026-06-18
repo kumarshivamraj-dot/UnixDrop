@@ -17,6 +17,7 @@ from unixdrop.tui import (
     _restart_deskflow_client_now,
     _start_local_receiver_now,
     _start_linux_receiver_now,
+    _stop_all_now,
     _swap_deskflow_role_now,
     _sync_receiver_endpoint,
     _update_quick_setup_config,
@@ -24,6 +25,29 @@ from unixdrop.tui import (
 
 
 class TuiTests(unittest.TestCase):
+    @patch("unixdrop.tui.subprocess.run")
+    @patch("unixdrop.tui.sys.platform", "darwin")
+    @patch("unixdrop.tui._set_deskflow_off", return_value=(True, "off"))
+    def test_stop_all_unloads_services_and_kills_components(self, _off_mock, run_mock) -> None:
+        run_mock.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            launch_agents = Path(tmp) / "Library" / "LaunchAgents"
+            launch_agents.mkdir(parents=True)
+            for name in (
+                "com.unixdrop.agent.plist",
+                "com.unixdrop.deskflow.server.plist",
+                "com.unixdrop.deskflow.client.plist",
+            ):
+                (launch_agents / name).write_text("plist")
+            with patch.dict(os.environ, {"HOME": tmp}):
+                ok, detail = _stop_all_now()
+
+        self.assertTrue(ok, detail)
+        commands = [call.args[0] for call in run_mock.call_args_list]
+        self.assertTrue(any(command[:2] == ["launchctl", "unload"] for command in commands))
+        self.assertTrue(any("unixdrop/discovery.py.*serve" in command for command in commands))
+        self.assertTrue(any("-m unixdrop.node" in command for command in commands))
+
     def test_quick_setup_config_enables_clipboard_and_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
