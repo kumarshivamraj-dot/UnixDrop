@@ -190,6 +190,12 @@ def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
     else:
         return False, f"automatic setup is unsupported on {sys.platform}"
 
+    disabled, disable_detail = _disable_standalone_deskflow_autostarts()
+    if not disabled:
+        return False, disable_detail
+    stopped, stop_detail = _stop_deskflow_processes()
+    if not stopped:
+        return False, stop_detail
     ok, detail = _run_command(command)
     if not ok:
         return False, f"Deskflow setup failed: {detail}"
@@ -303,6 +309,9 @@ def _sync_receiver_endpoint(
 
 def _start_deskflow_now() -> tuple[bool, str]:
     cfg = load_config()
+    running_role = _current_deskflow_role()
+    if running_role and running_role == cfg.deskflow_role:
+        return True, f"deskflow {running_role} already running; no action needed"
     script = deskflow_start_script(cfg, sys.platform)
     if script is None:
         return False, "deskflow role is off"
@@ -312,6 +321,15 @@ def _start_deskflow_now() -> tuple[bool, str]:
         return False, f"deskflow start script not executable: {script}"
     try:
         proc = subprocess.Popen([str(script)])
+        time.sleep(0.4)
+        return_code = proc.poll()
+        if return_code is not None:
+            if sys.platform == "darwin":
+                return False, (
+                    f"deskflow exited with code {return_code}; allow Deskflow in "
+                    "System Settings > Privacy & Security > Accessibility"
+                )
+            return False, f"deskflow exited with code {return_code}; check its service log"
         return True, f"deskflow start requested (pid={proc.pid})"
     except Exception as exc:
         return False, f"deskflow start failed: {exc}"
@@ -432,13 +450,53 @@ def _stop_deskflow_processes() -> tuple[bool, str]:
     )
     for pattern in stop_patterns:
         try:
-            result = subprocess.run(["pkill", "-f", pattern], capture_output=True, text=True, check=False)
+            result = subprocess.run(["pkill", "-KILL", "-f", pattern], capture_output=True, text=True, check=False)
         except FileNotFoundError:
             return False, "process killer not found: pkill"
         if result.returncode not in (0, 1):
             detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
             return False, f"failed to stop Deskflow process matching {pattern}: {detail}"
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not _current_deskflow_role():
+            return True, "stopped existing Deskflow processes"
+        time.sleep(0.1)
+    if _current_deskflow_role():
+        return False, "Deskflow did not stop within 2 seconds"
     return True, "stopped existing Deskflow processes"
+
+
+def _disable_standalone_deskflow_autostarts() -> tuple[bool, str]:
+    if sys.platform == "darwin":
+        for role in ("server", "client"):
+            plist = Path(f"~/Library/LaunchAgents/com.unixdrop.deskflow.{role}.plist").expanduser()
+            if not plist.exists():
+                continue
+            result = subprocess.run(
+                ["launchctl", "unload", str(plist)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode not in (0, 3):
+                detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+                return False, f"failed to disable old Deskflow {role} agent: {detail}"
+        return True, "disabled old standalone Deskflow agents"
+
+    if sys.platform.startswith("linux"):
+        for role in ("server", "client"):
+            result = subprocess.run(
+                ["systemctl", "--user", "disable", "--now", f"deskflow-{role}.service"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0 and "does not exist" not in result.stderr and "not loaded" not in result.stderr:
+                detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+                return False, f"failed to disable old Deskflow {role} service: {detail}"
+        return True, "disabled old standalone Deskflow services"
+
+    return False, f"unsupported platform: {sys.platform}"
 
 
 def _swap_deskflow_role_now() -> tuple[bool, str]:

@@ -17,6 +17,8 @@ from unixdrop.vault import build_manifest, file_sha256, should_skip_relative
 
 CONFIG = load_config()
 STATE_FILE = CONFIG.state_dir / "mac_state.json"
+DESKFLOW_RETRY_SECONDS = 30
+_DESKFLOW_RETRY_AFTER = 0.0
 
 
 def _default_state() -> dict:
@@ -56,15 +58,22 @@ def _start_deskflow_process() -> subprocess.Popen[str] | None:
 
 
 def _ensure_deskflow_running(process: subprocess.Popen[str] | None) -> subprocess.Popen[str] | None:
+    global _DESKFLOW_RETRY_AFTER
     if deskflow_start_script(CONFIG, sys.platform) is None:
         return None
     if process is None:
+        if time.monotonic() < _DESKFLOW_RETRY_AFTER:
+            return None
         return _start_deskflow_process()
     return_code = process.poll()
     if return_code is None:
         return process
-    print(f"Deskflow process exited with code {return_code}, restarting")
-    return _start_deskflow_process()
+    _DESKFLOW_RETRY_AFTER = time.monotonic() + DESKFLOW_RETRY_SECONDS
+    print(
+        f"Deskflow process exited with code {return_code}; "
+        f"retrying in {DESKFLOW_RETRY_SECONDS}s"
+    )
+    return None
 
 
 def _load_state() -> dict:

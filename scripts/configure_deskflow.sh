@@ -612,17 +612,27 @@ if [[ "${role}" == "server" ]]; then
   [[ -n "${client_name}" ]] || die "--client-name is required for server role"
   reverse_direction="$(opposite_direction "${direction}")"
   server_config_file="${config_dir}/deskflow-server.conf"
+  server_settings_file="${config_dir}/deskflow-core-server-settings.conf"
   start_script="${config_dir}/start-deskflow-server.sh"
 
   write_server_config "${server_config_file}" "${server_name}" "${client_name}" "${direction}" "${reverse_direction}"
+  cat > "${server_settings_file}" <<EOF
+[core]
+coreMode=2
+computerName=${server_name}
+
+[server]
+externalConfig=true
+externalConfigFile=${server_config_file}
+
+[security]
+tlsEnabled=false
+checkPeerFingerprints=false
+EOF
   if [[ "${platform}" == "macos" && "${deskflow_server_mode}" == "server" ]]; then
     sync_macos_core_server_config "${server_config_file}"
   fi
   server_start_body="$(cat <<EOF
-new_instance_flag=""
-if "${deskflow_server_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
-  new_instance_flag="--new-instance"
-fi
 if command -v lsof >/dev/null 2>&1; then
   existing_listener="\$(lsof -nP -iTCP:24800 -sTCP:LISTEN 2>/dev/null || true)"
   if [[ -n "\${existing_listener}" ]]; then
@@ -637,9 +647,24 @@ fi
 python3 "${discovery_script}" serve --name "${server_name}" --service-port 24800 &
 discovery_pid=\$!
 trap 'kill "\${discovery_pid}" >/dev/null 2>&1 || true' EXIT INT TERM
-"${deskflow_server_bin}" ${deskflow_server_mode} \${new_instance_flag} --no-daemon --name "${server_name}" --config "${server_config_file}" &
-deskflow_pid=\$!
-wait "\${deskflow_pid}"
+EOF
+)"
+  server_start_body+=$'\n'
+  if [[ "${deskflow_server_mode}" == "server" ]]; then
+    server_start_body+="$(cat <<EOF
+"${deskflow_server_bin}" server -s "${server_settings_file}" &
+EOF
+)"
+  else
+    server_start_body+="$(cat <<EOF
+"${deskflow_server_bin}" --no-daemon --name "${server_name}" --config "${server_config_file}" &
+EOF
+)"
+  fi
+  server_start_body+=$'\n'
+  server_start_body+="$(cat <<'EOF'
+deskflow_pid=$!
+wait "${deskflow_pid}"
 EOF
 )"
   if [[ -n "${deskflow_server_mode}" ]]; then
@@ -686,11 +711,8 @@ if [[ "${platform}" == "macos" ]]; then
   write_deskflow_client_settings "${HOME}/Library/Deskflow/Deskflow.conf" "${client_runtime_name}"
   log "client screen name written: ${HOME}/Library/Deskflow/Deskflow.conf"
 fi
+client_settings_file="${config_dir}/deskflow-core-client-settings.conf"
 client_start_body="$(cat <<EOF
-new_instance_flag=""
-if "${deskflow_client_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
-  new_instance_flag="--new-instance"
-fi
 server_candidates_csv="${server_ip}"
 if [[ -z "\${server_candidates_csv}" ]]; then
   server_candidates_csv="\$(python3 "${discovery_script}" discover --cache "${config_dir}/discovered-server.json" --timeout 4)" || {
@@ -753,33 +775,24 @@ update_remote_host_runtime() {
   local endpoint="\$1"
   local host=""
   local port=""
-  local deskflow_conf_dir="\${HOME}/.config/Deskflow"
-  local deskflow_conf_path="\${deskflow_conf_dir}/Deskflow.conf"
-  local tmp_file=""
+  local endpoint_with_port=""
 
   read -r host port <<<"\$(split_server_endpoint_runtime "\${endpoint}")"
   [[ -n "\${host}" ]] || return 0
+  endpoint_with_port="\${host}:\${port}"
+  cat > "${client_settings_file}" <<SETTINGS
+[core]
+coreMode=1
+computerName=${client_runtime_name}
+port=\${port}
 
-  mkdir -p "\${deskflow_conf_dir}"
-  if [[ -f "\${deskflow_conf_path}" ]]; then
-    if grep -Eq '^[[:space:]]*remoteHost[[:space:]]*=' "\${deskflow_conf_path}"; then
-      tmp_file="\$(mktemp)"
-      sed -E "s|^[[:space:]]*remoteHost[[:space:]]*=.*$|remoteHost=\${host}|" "\${deskflow_conf_path}" > "\${tmp_file}"
-      mv "\${tmp_file}" "\${deskflow_conf_path}"
-    else
-      printf '\nremoteHost=%s\n' "\${host}" >> "\${deskflow_conf_path}"
-    fi
-  else
-    printf 'remoteHost=%s\n' "\${host}" > "\${deskflow_conf_path}"
-  fi
+[client]
+remoteHost=\${endpoint_with_port}
 
-  if grep -Eq '^[[:space:]]*computerName[[:space:]]*=' "\${deskflow_conf_path}"; then
-    tmp_file="\$(mktemp)"
-    sed -E "s|^[[:space:]]*computerName[[:space:]]*=.*$|computerName=${client_runtime_name}|" "\${deskflow_conf_path}" > "\${tmp_file}"
-    mv "\${tmp_file}" "\${deskflow_conf_path}"
-  else
-    printf '\n[core]\ncomputerName=%s\n' "${client_runtime_name}" >> "\${deskflow_conf_path}"
-  fi
+[security]
+tlsEnabled=false
+checkPeerFingerprints=false
+SETTINGS
 }
 
 guard_single_client_instance_runtime() {
@@ -819,9 +832,20 @@ if [[ -z "\${selected_server}" ]]; then
 fi
 
 update_remote_host_runtime "\${selected_server}"
-exec "${deskflow_client_bin}" ${deskflow_client_mode} \${new_instance_flag} --no-daemon --name "${client_runtime_name}" "\${selected_server}"
 EOF
 )"
+client_start_body+=$'\n'
+if [[ "${deskflow_client_mode}" == "client" ]]; then
+  client_start_body+="$(cat <<EOF
+exec "${deskflow_client_bin}" client -s "${client_settings_file}"
+EOF
+)"
+else
+  client_start_body+="$(cat <<EOF
+exec "${deskflow_client_bin}" --no-daemon --name "${client_runtime_name}" "\${selected_server}"
+EOF
+)"
+fi
 if [[ -n "${deskflow_client_mode}" ]]; then
   write_start_script "${client_start_script}" "${client_start_body}"
 else

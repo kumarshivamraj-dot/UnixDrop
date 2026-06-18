@@ -37,11 +37,15 @@ class TuiTests(unittest.TestCase):
             self.assertEqual(payload["deskflow"]["role"], "client")
             self.assertTrue(payload["deskflow"]["enabled"])
 
+    @patch("unixdrop.tui._stop_deskflow_processes", return_value=(True, "stopped"))
+    @patch("unixdrop.tui._disable_standalone_deskflow_autostarts", return_value=(True, "disabled"))
     @patch("unixdrop.tui._start_deskflow_now", return_value=(True, "started"))
     @patch("unixdrop.tui._update_quick_setup_config", return_value=(True, "saved"))
     @patch("unixdrop.tui._run_command", return_value=(True, "ok"))
     @patch("unixdrop.tui.sys.platform", "darwin")
-    def test_quick_setup_mac_uses_peer_hostname(self, run_mock, _config_mock, _start_mock) -> None:
+    def test_quick_setup_mac_uses_peer_hostname(
+        self, run_mock, _config_mock, _start_mock, _disable_mock, _stop_mock
+    ) -> None:
         ok, detail = _quick_setup_deskflow("thinkpad.local")
 
         self.assertTrue(ok, detail)
@@ -50,12 +54,16 @@ class TuiTests(unittest.TestCase):
         self.assertIn("thinkpad.local", command)
         self.assertIn("right", command)
 
+    @patch("unixdrop.tui._stop_deskflow_processes", return_value=(True, "stopped"))
+    @patch("unixdrop.tui._disable_standalone_deskflow_autostarts", return_value=(True, "disabled"))
     @patch("unixdrop.tui._start_deskflow_now", return_value=(True, "started"))
     @patch("unixdrop.tui._update_quick_setup_config", return_value=(True, "saved"))
     @patch("unixdrop.tui._default_client_name", return_value="thinkpad")
     @patch("unixdrop.tui._run_command", return_value=(True, "ok"))
     @patch("unixdrop.tui.sys.platform", "linux")
-    def test_quick_setup_linux_uses_discovery(self, run_mock, _name_mock, _config_mock, _start_mock) -> None:
+    def test_quick_setup_linux_uses_discovery(
+        self, run_mock, _name_mock, _config_mock, _start_mock, _disable_mock, _stop_mock
+    ) -> None:
         ok, detail = _quick_setup_deskflow()
 
         self.assertTrue(ok, detail)
@@ -118,8 +126,11 @@ class TuiTests(unittest.TestCase):
 
     @patch("unixdrop.tui.subprocess.Popen")
     @patch("unixdrop.tui.subprocess.run")
+    @patch("unixdrop.tui._current_deskflow_role", side_effect=["server", None])
     @patch("unixdrop.tui.load_config")
-    def test_swap_deskflow_role_server_to_client(self, load_config_mock, run_mock, popen_mock) -> None:
+    def test_swap_deskflow_role_server_to_client(
+        self, load_config_mock, current_role_mock, run_mock, popen_mock
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server_script = Path(tmp) / "start-deskflow-server.sh"
             client_script = Path(tmp) / "start-deskflow-client.sh"
@@ -146,7 +157,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("server -> client", detail)
             self.assertIn("pid=2468", detail)
             popen_mock.assert_called_once_with([str(client_script)])
-            self.assertGreaterEqual(run_mock.call_count, 5)
+            self.assertGreaterEqual(run_mock.call_count, 4)
 
     @patch("unixdrop.tui.sys.platform", "linux")
     @patch("unixdrop.tui.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="", stderr=""))
