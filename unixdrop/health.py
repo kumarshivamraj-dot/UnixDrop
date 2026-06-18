@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+import time
 from pathlib import Path
 from urllib import request
 
@@ -35,6 +36,19 @@ def _request_json(path: str, method: str = "GET", payload: dict | None = None, a
     )
     with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _request_json_timed(path: str, method: str = "GET", payload: dict | None = None, auth: bool = True) -> tuple[dict, float]:
+    started = time.perf_counter()
+    payload_json = _request_json(path, method=method, payload=payload, auth=auth)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return payload_json, elapsed_ms
+
+
+def _format_latency(latency_ms: float) -> str:
+    if latency_ms < 10:
+        return f"{latency_ms:.1f} ms"
+    return f"{latency_ms:.0f} ms"
 
 
 def _check_launchd() -> tuple[bool, str]:
@@ -85,16 +99,28 @@ def health_lines() -> list[str]:
     receiver_reachable = False
 
     try:
-        payload = _request_json("/health", auth=False)
+        payload, latency_ms = _request_json_timed("/health", auth=False)
         receiver_reachable = bool(payload.get("ok"))
-        lines.append(_result("Peer HTTP receiver reachable", receiver_reachable, "reachable"))
+        lines.append(
+            _result(
+                "Peer HTTP receiver reachable",
+                receiver_reachable,
+                f"reachable ({_format_latency(latency_ms)})",
+            )
+        )
     except Exception as exc:
         lines.append(_result("Peer HTTP receiver reachable", False, str(exc)))
 
     if receiver_reachable:
         try:
-            payload = _request_json("/api/ping", method="POST")
-            lines.append(_result("send test ping", bool(payload.get("ok")), "pong" if payload.get("pong") else "unexpected response"))
+            payload, latency_ms = _request_json_timed("/api/ping", method="POST")
+            lines.append(
+                _result(
+                    "send test ping",
+                    bool(payload.get("ok")),
+                    f"{'pong' if payload.get('pong') else 'unexpected response'} ({_format_latency(latency_ms)})",
+                )
+            )
         except Exception as exc:
             lines.append(_result("send test ping", False, str(exc)))
     else:

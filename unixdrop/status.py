@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import request
@@ -40,16 +41,26 @@ def _fetch_json(path: str) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _check_health() -> tuple[bool, dict, str]:
+def _check_health() -> tuple[bool, dict, str, float | None]:
+    started = time.perf_counter()
     try:
         req = request.Request(CONFIG.receiver_url.rstrip("/") + "/health")
         with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return bool(payload.get("ok")), payload, "reachable"
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        return bool(payload.get("ok")), payload, "reachable", latency_ms
     except URLError as exc:
-        return False, {}, str(exc.reason)
+        return False, {}, str(exc.reason), None
     except Exception as exc:
-        return False, {}, str(exc)
+        return False, {}, str(exc), None
+
+
+def _format_latency(latency_ms: float | None) -> str:
+    if latency_ms is None:
+        return "unknown"
+    if latency_ms < 10:
+        return f"{latency_ms:.1f} ms"
+    return f"{latency_ms:.0f} ms"
 
 
 def _format_age(timestamp: float | None) -> str:
@@ -140,16 +151,19 @@ def _vault_status(state: dict) -> list[str]:
 
 def status_lines() -> list[str]:
     state = _read_state()
-    receiver_ok, health_payload, detail = _check_health()
+    receiver_ok, health_payload, detail, latency_ms = _check_health()
     service_ok, service_detail = _check_local_node_service()
 
     lines = ["Deskbridge status"]
     lines.append(f"Local node service running: {'yes' if service_ok else 'no'} ({service_detail})")
     lines.append(f"Peer receiver reachable: {'yes' if receiver_ok else 'no'} ({detail})")
+    lines.append(f"Peer receiver latency: {_format_latency(latency_ms)}")
     lines.append(f"Peer receiver version: {health_payload.get('version', 'unknown')}")
     lines.append(f"peer hostname: {health_payload.get('hostname', 'unknown')}")
     lines.append(f"auto_open_links: {health_payload.get('auto_open_links', CONFIG.auto_open_links)}")
     lines.append(f"clipboard_mode: {health_payload.get('clipboard_mode', CONFIG.clipboard_mode)}")
+    lines.append(f"deskflow_enabled: {'yes' if CONFIG.deskflow_enabled else 'no'}")
+    lines.append(f"deskflow_role: {CONFIG.deskflow_role}")
     lines.append(f"local drop folder: {CONFIG.drop_dir}")
     lines.append(f"local inbox: {CONFIG.inbox_dir}")
     lines.append(f"pending files in drop folder: {_pending_drop_files()}")

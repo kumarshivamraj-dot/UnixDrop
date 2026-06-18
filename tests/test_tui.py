@@ -13,12 +13,14 @@ from unixdrop.tui import (
     _first_endpoint_host,
     _open_drop_folder_now,
     _parse_health,
+    _parse_latency_ms,
     _quick_setup_deskflow,
     _restart_deskflow_client_now,
     _start_local_receiver_now,
     _start_linux_receiver_now,
     _stop_all_now,
     _swap_deskflow_role_now,
+    _top_summary,
     _sync_receiver_endpoint,
     _update_quick_setup_config,
 )
@@ -110,6 +112,28 @@ class TuiTests(unittest.TestCase):
                 (False, "send test ping", "timeout"),
             ],
         )
+
+    def test_parse_latency_ms(self) -> None:
+        self.assertEqual(_parse_latency_ms("12 ms"), 12.0)
+        self.assertEqual(_parse_latency_ms("7.5 ms"), 7.5)
+        self.assertIsNone(_parse_latency_ms("unknown"))
+
+    def test_top_summary_includes_latency_and_peer(self) -> None:
+        summary = _top_summary(
+            {
+                "peer receiver reachable": "yes",
+                "peer receiver latency": "14 ms",
+                "clipboard_mode": "two_way",
+                "deskflow_enabled": "yes",
+                "deskflow_role": "client",
+                "peer hostname": "kashira",
+            },
+            [14.0, 12.0, 16.0],
+        )
+        self.assertIn("receiver up", summary)
+        self.assertIn("latency 14 ms", summary)
+        self.assertIn("jitter", summary)
+        self.assertIn("peer kashira", summary)
 
     @patch("unixdrop.tui.subprocess.Popen")
     @patch("unixdrop.tui.subprocess.run")

@@ -11,8 +11,10 @@ import termios
 import time
 import tty
 from contextlib import contextmanager
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+from statistics import pstdev
 from urllib.parse import urlparse
 
 from unixdrop.config import DEFAULT_CONFIG_PATH, ENV_CONFIG_PATH, deskflow_start_script, load_config
@@ -21,6 +23,7 @@ from unixdrop.status import status_lines
 
 
 HEALTH_RE = re.compile(r"^\[(ok|fail)\]\s+(.+?):\s*(.*)$")
+LATENCY_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*ms$", re.IGNORECASE)
 DEFAULT_TUI_SERVER_HOSTS = "100.76.14.117:24800"
 DEFAULT_TUI_RECEIVER_URL = "http://100.118.15.70:8765"
 
@@ -54,8 +57,16 @@ def _red(text: str) -> str:
     return f"\033[31m{text}\033[0m"
 
 
+def _yellow(text: str) -> str:
+    return f"\033[33m{text}\033[0m"
+
+
 def _cyan(text: str) -> str:
     return f"\033[36m{text}\033[0m"
+
+
+def _dim(text: str) -> str:
+    return f"\033[2m{text}\033[0m"
 
 
 def _clear() -> None:
@@ -108,6 +119,87 @@ def _default_client_name() -> str:
     result = subprocess.run(["hostname"], capture_output=True, text=True, check=False)
     name = result.stdout.strip()
     return name or "deskflow-client"
+
+
+def _parse_latency_ms(value: str) -> float | None:
+    matched = LATENCY_RE.match(value.strip())
+    if not matched:
+        return None
+    try:
+        return float(matched.group("value"))
+    except ValueError:
+        return None
+
+
+def _format_latency_badge(latency_ms: float | None) -> str:
+    if latency_ms is None:
+        return _yellow("latency unknown")
+    if latency_ms < 20:
+        return _green(f"latency {latency_ms:.0f} ms")
+    if latency_ms < 60:
+        return _yellow(f"latency {latency_ms:.0f} ms")
+    return _red(f"latency {latency_ms:.0f} ms")
+
+
+def _format_jitter_badge(samples: list[float]) -> str:
+    if len(samples) < 2:
+        return _cyan("jitter n/a")
+    jitter_ms = pstdev(samples)
+    if jitter_ms < 5:
+        return _green(f"jitter {jitter_ms:.0f} ms")
+    if jitter_ms < 20:
+        return _yellow(f"jitter {jitter_ms:.0f} ms")
+    return _red(f"jitter {jitter_ms:.0f} ms")
+
+
+def _top_summary(status: dict[str, str], latency_samples: list[float]) -> str:
+    receiver = status.get("peer receiver reachable", "unknown")
+    clipboard_mode = status.get("clipboard_mode", "unknown")
+    deskflow_enabled = status.get("deskflow_enabled", "no")
+    deskflow_role = status.get("deskflow_role", "off")
+    peer_hostname = status.get("peer hostname", "unknown")
+    latency = _parse_latency_ms(status.get("peer receiver latency", "unknown"))
+    receiver_badge = _green("receiver up") if receiver.startswith("yes") else _red("receiver down")
+    deskflow_badge = (
+        _green(f"deskflow {deskflow_role}")
+        if deskflow_enabled.startswith("yes") and deskflow_role != "off"
+        else _yellow("deskflow off")
+    )
+    return " | ".join(
+        (
+            receiver_badge,
+            _format_latency_badge(latency),
+            _format_jitter_badge(latency_samples),
+            _cyan(f"clipboard {clipboard_mode}"),
+            deskflow_badge,
+            _cyan(f"peer {peer_hostname}"),
+        )
+    )
+
+
+def _panel_width(lines: list[str], title: str) -> int:
+    content_width = max([len(title)] + [len(line) for line in lines])
+    return max(content_width + 2, 28)
+
+
+def _panel_lines(title: str, body: list[str]) -> list[str]:
+    width = _panel_width(body, title)
+    top = f"+-{title.ljust(width - 2, '-')}-+"
+    lines = [top]
+    for line in body:
+        lines.append(f"| {line.ljust(width - 4)} |")
+    lines.append(f"+{'-' * (width - 2)}+")
+    return lines
+
+
+def _center_badges(badges: list[str], width: int) -> str:
+    text = "  ".join(badges)
+    if len(text) >= width:
+        return text
+    padding = width - len(text)
+    left = padding // 2
+    right = padding - left
+    return f"{' ' * left}{text}{' ' * right}"
 
 
 def _run_command(command: list[str]) -> tuple[bool, str]:
@@ -630,42 +722,76 @@ def _render(
     snapshot_time: str,
     checks: list[tuple[bool, str, str]],
     status: dict[str, str],
+    latency_samples: list[float],
     interval: float,
     message: str,
 ) -> None:
     _clear()
     print(_cyan("Deskbridge TUI"))
-    print(
-        f"Updated: {snapshot_time} | refresh={interval:.1f}s | "
-        "keys: s setup, q close UI, x stop all, e endpoints, d deskflow, r reverse, o drop"
-    )
+    print(f"Updated: {snapshot_time} | refresh={interval:.1f}s")
+    summary_line = _top_summary(status, latency_samples)
+    summary_width = max(78, len(summary_line) + 4)
+    summary_body = [
+        _center_badges(
+            [
+                _green("receiver up") if status.get("peer receiver reachable", "unknown").startswith("yes") else _red("receiver down"),
+                _format_latency_badge(_parse_latency_ms(status.get("peer receiver latency", "unknown"))),
+                _format_jitter_badge(latency_samples),
+            ],
+            summary_width - 4,
+        ),
+        _center_badges(
+            [
+                _cyan(f"clipboard {status.get('clipboard_mode', 'unknown')}"),
+                _cyan(f"peer {status.get('peer hostname', 'unknown')}"),
+                _green(f"deskflow {status.get('deskflow_role', 'off')}")
+                if status.get("deskflow_enabled", "no").startswith("yes") and status.get("deskflow_role", "off") != "off"
+                else _yellow("deskflow off"),
+            ],
+            summary_width - 4,
+        ),
+    ]
+    for line in _panel_lines("connection summary", summary_body):
+        print(line)
+    print("keys: s setup, q close UI, x stop all, e endpoints, d deskflow, r reverse, o drop")
     print("")
 
     receiver = status.get("peer receiver reachable", "unknown")
+    receiver_latency = status.get("peer receiver latency", "unknown")
     clipboard_mode = status.get("clipboard_mode", "unknown")
-    deskflow_hint = "managed by unixdrop" if status.get("local node service running", "no").startswith("yes") else "unknown"
+    deskflow_enabled = status.get("deskflow_enabled", "no")
+    deskflow_role = status.get("deskflow_role", "off")
+    deskflow_hint = (
+        f"{deskflow_role} (managed by unixdrop)" if deskflow_enabled.startswith("yes") else "managed by unixdrop"
+    )
     print(f"Receiver: {receiver}")
+    print(f"Latency: {receiver_latency}")
     print(f"Clipboard mode: {clipboard_mode}")
     print(f"Deskflow: {deskflow_hint}")
+    print(f"Peer hostname: {status.get('peer hostname', 'unknown')}")
     print(f"Message: {message}")
     print("")
 
-    print("Drop to peer:")
-    print(f"  folder: {status.get('local drop folder', 'unknown')}")
-    print(f"  local inbox: {status.get('local inbox', 'unknown')}")
-    print(f"  pending: {status.get('pending files in drop folder', 'unknown')}")
-    print(f"  last upload: {status.get('last upload result', 'none')}")
+    drop_lines = [
+        f"folder      : {status.get('local drop folder', 'unknown')}",
+        f"local inbox : {status.get('local inbox', 'unknown')}",
+        f"pending     : {status.get('pending files in drop folder', 'unknown')}",
+        f"last upload : {status.get('last upload result', 'none')}",
+    ]
+    for line in _panel_lines("drop to peer", drop_lines):
+        print(line)
     print("")
 
-    print("Component checks:")
+    print(_dim("Component checks"))
     for ok, name, detail in checks:
         label = _green("OK  ") if ok else _red("FAIL")
-        print(f"  {label}  {name}  |  {detail}")
+        print(f"  {label}  {name:<28} |  {detail}")
 
 
 def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
     interval = max(interval_seconds, 0.5)
     message = "ready"
+    latency_samples = deque(maxlen=8)
     receiver_ok, receiver_detail = _start_local_receiver_now()
     message = receiver_detail if receiver_ok else f"warning: {receiver_detail}"
     with _raw_stdin():
@@ -673,7 +799,10 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             health = _parse_health(health_lines())
             status = _collect_status_map(status_lines())
-            _render(now, health, status, interval, message)
+            latency_ms = _parse_latency_ms(status.get("peer receiver latency", "unknown"))
+            if latency_ms is not None:
+                latency_samples.append(latency_ms)
+            _render(now, health, status, list(latency_samples), interval, message)
             if once:
                 return 0
             key = _read_key(interval)
