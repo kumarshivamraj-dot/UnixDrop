@@ -3,11 +3,16 @@ from __future__ import annotations
 import tempfile
 import unittest
 import os
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
 from unixdrop.cli import (
+<<<<<<< HEAD
     _cmd_url,
+=======
+    _cmd_deskflow,
+>>>>>>> 35867e6 (v020)
     _drop_destination,
     _send_file_to_receiver,
     _stage_drop_files,
@@ -17,6 +22,25 @@ from unixdrop.cli import (
 
 
 class CliTests(unittest.TestCase):
+    @mock.patch("unixdrop.cli.subprocess.run")
+    def test_deskflow_client_allows_automatic_discovery(self, run_mock: mock.MagicMock) -> None:
+        args = Namespace(
+            role="client",
+            server_ip=None,
+            server_hosts=None,
+            client_name="thinkpad",
+            server_name=None,
+            direction=None,
+            config_dir=None,
+            autostart=True,
+            verify=False,
+        )
+
+        self.assertEqual(_cmd_deskflow(args), 0)
+        command = run_mock.call_args.args[0]
+        self.assertNotIn("--server-ip", command)
+        self.assertIn("--autostart", command)
+
     def test_stage_drop_files_copies_into_drop_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

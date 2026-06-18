@@ -16,6 +16,7 @@ from unixdrop.tui import (
     _restart_deskflow_client_now,
     _start_local_receiver_now,
     _start_linux_receiver_now,
+    _swap_deskflow_role_now,
     _sync_receiver_endpoint,
 )
 
@@ -73,6 +74,88 @@ class TuiTests(unittest.TestCase):
             ok, detail = _restart_deskflow_client_now()
             self.assertFalse(ok)
             self.assertIn("not executable", detail)
+
+    @patch("unixdrop.tui.subprocess.Popen")
+    @patch("unixdrop.tui.subprocess.run")
+    @patch("unixdrop.tui.load_config")
+    def test_swap_deskflow_role_server_to_client(self, load_config_mock, run_mock, popen_mock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server_script = Path(tmp) / "start-deskflow-server.sh"
+            client_script = Path(tmp) / "start-deskflow-client.sh"
+            server_script.write_text("#!/usr/bin/env bash\nexit 0\n")
+            client_script.write_text("#!/usr/bin/env bash\nexit 0\n")
+            os.chmod(server_script, 0o755)
+            os.chmod(client_script, 0o755)
+            load_config_mock.return_value = SimpleNamespace(
+                deskflow_mac_start_script=server_script,
+                deskflow_linux_start_script=client_script,
+            )
+            popen_mock.return_value = SimpleNamespace(pid=2468)
+
+            def run_side_effect(command, **_kwargs):
+                pattern = command[-1]
+                returncode = 0 if command[0] == "pgrep" and pattern == "deskflow-server" else 1
+                return SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+            run_mock.side_effect = run_side_effect
+
+            ok, detail = _swap_deskflow_role_now()
+
+            self.assertTrue(ok)
+            self.assertIn("server -> client", detail)
+            self.assertIn("pid=2468", detail)
+            popen_mock.assert_called_once_with([str(client_script)])
+            self.assertGreaterEqual(run_mock.call_count, 5)
+
+    @patch("unixdrop.tui.sys.platform", "linux")
+    @patch("unixdrop.tui.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="", stderr=""))
+    @patch("unixdrop.tui.load_config")
+    def test_swap_deskflow_role_reports_missing_opposite_script(self, load_config_mock, _run_mock) -> None:
+        load_config_mock.return_value = SimpleNamespace(
+            deskflow_mac_start_script=Path("/tmp/does-not-exist-server.sh"),
+            deskflow_linux_start_script=Path("/tmp/does-not-exist-client.sh"),
+        )
+
+        ok, detail = _swap_deskflow_role_now()
+
+        self.assertFalse(ok)
+        self.assertIn("server start script missing", detail)
+
+    @patch("unixdrop.tui.sys.platform", "linux")
+    @patch("unixdrop.tui.subprocess.Popen")
+    @patch("unixdrop.tui.subprocess.run")
+    @patch("unixdrop.tui.load_config")
+    def test_swap_deskflow_role_aborts_when_stop_fails(self, load_config_mock, run_mock, popen_mock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server_script = Path(tmp) / "start-deskflow-server.sh"
+            server_script.write_text("#!/usr/bin/env bash\nexit 0\n")
+            os.chmod(server_script, 0o755)
+            load_config_mock.return_value = SimpleNamespace(
+                deskflow_mac_start_script=server_script,
+                deskflow_linux_start_script=Path(tmp) / "start-deskflow-client.sh",
+            )
+
+            def run_side_effect(command, **_kwargs):
+                if command[0] == "pgrep":
+                    return SimpleNamespace(returncode=1, stdout="", stderr="")
+                return SimpleNamespace(returncode=2, stdout="", stderr="permission denied")
+
+            run_mock.side_effect = run_side_effect
+
+            ok, detail = _swap_deskflow_role_now()
+
+            self.assertFalse(ok)
+            self.assertIn("failed to stop Deskflow process", detail)
+            popen_mock.assert_not_called()
+
+    @patch("unixdrop.tui.sys.platform", "linux")
+    @patch("unixdrop.tui.subprocess.run", return_value=SimpleNamespace(returncode=1, stdout="", stderr=""))
+    @patch("unixdrop.tui.load_config", side_effect=FileNotFoundError("missing config"))
+    def test_swap_deskflow_role_reports_config_load_failure(self, _load_config_mock, _run_mock) -> None:
+        ok, detail = _swap_deskflow_role_now()
+
+        self.assertFalse(ok)
+        self.assertIn("failed to load Deskflow config", detail)
 
     def test_first_endpoint_host(self) -> None:
         self.assertEqual(_first_endpoint_host("192.168.1.5:24800,100.64.0.2:24800"), "192.168.1.5")

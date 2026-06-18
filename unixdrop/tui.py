@@ -328,6 +328,79 @@ def _restart_deskflow_client_now() -> tuple[bool, str]:
         return False, f"deskflow client restart failed: {exc}"
 
 
+def _deskflow_role_running(role: str) -> bool:
+    patterns = {
+        "server": ("deskflow-server", "deskflow-core.*server"),
+        "client": ("deskflow-client", "deskflow-core.*client"),
+    }
+    for pattern in patterns[role]:
+        try:
+            result = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            return False
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def _current_deskflow_role() -> str | None:
+    if _deskflow_role_running("server"):
+        return "server"
+    if _deskflow_role_running("client"):
+        return "client"
+    return None
+
+
+def _configured_deskflow_script_for_role(role: str) -> Path:
+    cfg = load_config()
+    if role == "server":
+        return cfg.deskflow_mac_start_script
+    return cfg.deskflow_linux_start_script
+
+
+def _stop_deskflow_processes() -> tuple[bool, str]:
+    stop_patterns = (
+        "deskflow-server",
+        "deskflow-client",
+        "deskflow-core.*server",
+        "deskflow-core.*client",
+    )
+    for pattern in stop_patterns:
+        try:
+            result = subprocess.run(["pkill", "-f", pattern], capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            return False, "process killer not found: pkill"
+        if result.returncode not in (0, 1):
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+            return False, f"failed to stop Deskflow process matching {pattern}: {detail}"
+    return True, "stopped existing Deskflow processes"
+
+
+def _swap_deskflow_role_now() -> tuple[bool, str]:
+    current_role = _current_deskflow_role()
+    if current_role is None:
+        current_role = "server" if sys.platform == "darwin" else "client"
+    next_role = "client" if current_role == "server" else "server"
+    try:
+        script = _configured_deskflow_script_for_role(next_role)
+    except Exception as exc:
+        return False, f"failed to load Deskflow config: {exc}"
+    if not script.exists():
+        return False, f"deskflow {next_role} start script missing: {script}"
+    if not os.access(script, os.X_OK):
+        return False, f"deskflow {next_role} start script not executable: {script}"
+
+    stopped, stop_detail = _stop_deskflow_processes()
+    if not stopped:
+        return False, stop_detail
+
+    try:
+        proc = subprocess.Popen([str(script)])
+        return True, f"deskflow switched {current_role} -> {next_role} (pid={proc.pid})"
+    except Exception as exc:
+        return False, f"deskflow role switch failed: {exc}"
+
+
 def _render(
     snapshot_time: str,
     checks: list[tuple[bool, str, str]],
@@ -339,7 +412,7 @@ def _render(
     print(_cyan("Deskbridge TUI"))
     print(
         f"Updated: {snapshot_time} | refresh={interval:.1f}s | "
-        "keys: q quit, e edit endpoints, d start deskflow, o open drop"
+        "keys: q quit, e edit endpoints, d start deskflow, r reverse deskflow, o open drop"
     )
     print("")
 
@@ -412,6 +485,10 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                 continue
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()
+                message = detail if ok else f"error: {detail}"
+                continue
+            if key.lower() == "r":
+                ok, detail = _swap_deskflow_role_now()
                 message = detail if ok else f"error: {detail}"
                 continue
             if key.lower() == "o":

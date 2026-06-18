@@ -16,7 +16,7 @@ Server role options:
   --server-name NAME           Server screen name (default: local hostname)
 
 Client role options:
-  --server-ip IP               Server endpoint (host or host:port)
+  --server-ip IP               Optional fixed endpoint (host or host:port)
   --server-hosts LIST          Comma-separated endpoints. Order matters.
   --client-name NAME           Client runtime screen name override (default: local hostname)
 
@@ -28,7 +28,7 @@ Shared options:
 
 Examples:
   ./scripts/configure_deskflow.sh --role server --client-name thinkpad --direction right --autostart
-  ./scripts/configure_deskflow.sh --role client --server-ip 192.168.1.50 --autostart
+  ./scripts/configure_deskflow.sh --role client --autostart
   ./scripts/configure_deskflow.sh --role client --server-hosts 192.168.1.50:24800,100.64.0.12:24800 --autostart
   ./scripts/configure_deskflow.sh --role server --verify
 EOF
@@ -376,7 +376,7 @@ extract_client_server_ip() {
   if [[ ! -f "${start_script}" ]]; then
     return 1
   fi
-  sed -n 's/.*"\([^"]*\)"[[:space:]]*$/\1/p' "${start_script}" | tail -n 1
+  sed -n 's/^server_candidates_csv="\([^"]*\)"[[:space:]]*$/\1/p' "${start_script}" | head -n 1
 }
 
 verify_server_setup() {
@@ -457,10 +457,13 @@ verify_client_setup() {
   if [[ -z "${server_ip_resolved}" ]]; then
     server_ip_resolved="$(extract_client_server_ip "${start_script}" || true)"
   fi
+  if [[ -z "${server_ip_resolved}" && -f "${discovery_script}" ]]; then
+    server_ip_resolved="$(python3 "${discovery_script}" discover --cache "${config_dir}/discovered-server.json" --timeout 4 2>/dev/null || true)"
+  fi
   if [[ -n "${server_ip_resolved}" ]]; then
     check_result "true" "server address configured" "${server_ip_resolved}"
   else
-    check_result "false" "server address configured" "pass --server-ip or re-run client setup"
+    check_result "false" "server address configured" "automatic discovery failed; ensure UDP 24801 is allowed"
     server_ip_resolved=""
   fi
 
@@ -500,6 +503,8 @@ autostart="false"
 verify_mode="false"
 autostart_hint=""
 config_dir="${HOME}/.config/deskflow"
+project_dir="$(cd "$(dirname "$0")/.." && pwd)"
+discovery_script="${project_dir}/unixdrop/discovery.py"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -629,7 +634,12 @@ if command -v lsof >/dev/null 2>&1; then
     exit 1
   fi
 fi
-exec "${deskflow_server_bin}" ${deskflow_server_mode} \${new_instance_flag} --no-daemon --name "${server_name}" --config "${server_config_file}"
+python3 "${discovery_script}" serve --name "${server_name}" --service-port 24800 &
+discovery_pid=\$!
+trap 'kill "\${discovery_pid}" >/dev/null 2>&1 || true' EXIT INT TERM
+"${deskflow_server_bin}" ${deskflow_server_mode} \${new_instance_flag} --no-daemon --name "${server_name}" --config "${server_config_file}" &
+deskflow_pid=\$!
+wait "\${deskflow_pid}"
 EOF
 )"
   if [[ -n "${deskflow_server_mode}" ]]; then
@@ -658,13 +668,12 @@ EOF
 Next steps (server):
 1) Start now: ${start_script}
 2) On client machine run:
-   ./scripts/configure_deskflow.sh --role client --server-ip <server-ip>${autostart_hint}
-3) Ensure firewall allows TCP port 24800 on server.
+   ./scripts/configure_deskflow.sh --role client${autostart_hint}
+3) Ensure firewall allows TCP 24800 and UDP 24801 on the server.
 EOF
   exit 0
 fi
 
-[[ -n "${server_ip}" ]] || die "--server-ip is required for client role"
 client_start_script="${config_dir}/start-deskflow-client.sh"
 client_runtime_name="${client_name:-$(hostname 2>/dev/null || hostname -s)}"
 write_deskflow_client_settings "${config_dir}/Deskflow.conf" "${client_runtime_name}"
@@ -683,6 +692,13 @@ if "${deskflow_client_bin}" --help 2>&1 | grep -q -- '--new-instance'; then
   new_instance_flag="--new-instance"
 fi
 server_candidates_csv="${server_ip}"
+if [[ -z "\${server_candidates_csv}" ]]; then
+  server_candidates_csv="\$(python3 "${discovery_script}" discover --cache "${config_dir}/discovered-server.json" --timeout 4)" || {
+    echo "Could not discover the Deskflow server. Check that both machines are on the same LAN and UDP 24801 is allowed." >&2
+    exit 1
+  }
+  echo "Discovered Deskflow server: \${server_candidates_csv}"
+fi
 
 split_server_endpoint_runtime() {
   local value="\$1"
@@ -826,5 +842,5 @@ cat <<EOF
 
 Next steps (client):
 1) Start now: ${client_start_script}
-2) Verify the server service is running and reachable at ${server_ip}
+2) The server is discovered automatically at every start; the last result is cached as a fallback.
 EOF

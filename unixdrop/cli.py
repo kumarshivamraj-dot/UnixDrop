@@ -869,17 +869,17 @@ def build_parser() -> argparse.ArgumentParser:
             "  1. On the machine with the keyboard/mouse, run server setup:\n"
             "     ./deskbridge deskflow --role server --client-name thinkpad --direction right --autostart\n\n"
             "  2. On the other machine, run client setup:\n"
-            "     ./deskbridge deskflow --role client --server-ip <server-ip> --client-name thinkpad --autostart\n\n"
+            "     ./deskbridge deskflow --role client --client-name thinkpad --autostart\n\n"
             "  3. If you have LAN and Tailscale endpoints, use fallback hosts on the client:\n"
             "     ./deskbridge deskflow --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --client-name thinkpad --autostart\n\n"
             "  4. Verify later:\n"
             "     ./deskbridge deskflow --role server --verify\n"
-            "     ./deskbridge deskflow --role client --server-ip <server-ip> --verify\n\n"
+            "     ./deskbridge deskflow --role client --verify\n\n"
             "Common values:\n"
             "  --direction right   Client screen is to the right of the server screen.\n"
             "  --direction left    Client screen is to the left of the server screen.\n"
             "  --client-name       Name of the client screen, for example thinkpad.\n"
-            "  --server-ip         Server host or host:port, for example 192.168.1.20 or 192.168.1.20:24800.\n"
+            "  --server-ip         Optional fixed fallback when LAN discovery is unavailable.\n"
         ),
     )
     deskflow_parser.add_argument(
@@ -890,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deskflow_parser.add_argument(
         "--server-ip",
-        help="Client setup: server host or host:port to connect to, e.g. 192.168.1.20 or 192.168.1.20:24800.",
+        help="Client setup: optional fixed host or host:port; otherwise discover the server automatically.",
     )
     deskflow_parser.add_argument(
         "--server-hosts",

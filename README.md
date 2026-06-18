@@ -69,7 +69,7 @@ Run from repo root:
 ./deskbridge dropzone
 ./deskbridge clean
 ./deskbridge deskflow --role server --client-name thinkpad --direction right
-./deskbridge deskflow --role client --server-hosts <lan-ip>:24800 --client-name thinkpad
+./deskbridge deskflow --role client --client-name thinkpad
 ```
 
 TUI keys:
@@ -77,7 +77,12 @@ TUI keys:
 - `q`: quit
 - `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
 - `d`: start Deskflow using configured start script
+<<<<<<< HEAD
 - `o`: open the local drop folder
+=======
+- `r`: reverse Deskflow role using the opposite configured start script
+- `o`: open the Drop to ThinkPad folder
+>>>>>>> 35867e6 (v020)
 
 If Deskflow gets stuck in duplicate client loops (`already connected`), run:
 
@@ -148,17 +153,19 @@ Use the included setup script on each machine:
 2. On the other machine (client):
 
 ```bash
-./scripts/configure_deskflow.sh --role client --server-ip <server-ip> --autostart
+./scripts/configure_deskflow.sh --role client --autostart
 ```
 
 Equivalent `deskbridge` commands:
 
 ```bash
 ./deskbridge deskflow --role server --client-name thinkpad --direction right --autostart
-./deskbridge deskflow --role client --server-ip <server-ip> --client-name thinkpad --autostart
+./deskbridge deskflow --role client --client-name thinkpad --autostart
 ```
 
-Prefer LAN first, Tailscale fallback:
+No IP address is stored in the default setup. The server answers UnixDrop LAN discovery on UDP 24801; the client discovers it at every start and caches the last working address. DHCP address changes therefore require no reconfiguration.
+
+For networks that block broadcast/multicast discovery, fixed LAN/Tailscale fallbacks remain available:
 
 ```bash
 ./scripts/configure_deskflow.sh --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --autostart
@@ -168,16 +175,17 @@ Verify each side after setup:
 
 ```bash
 ./scripts/configure_deskflow.sh --role server --verify
-./scripts/configure_deskflow.sh --role client --server-ip <server-ip> --verify
+./scripts/configure_deskflow.sh --role client --verify
 ```
 
 Notes:
 
 - `--direction` is where the client is positioned relative to the server (`right|left|up|down`).
-- `--server-hosts` accepts a comma-separated endpoint list and picks the first reachable endpoint at startup.
+- Client setup uses automatic LAN discovery when neither `--server-ip` nor `--server-hosts` is supplied.
+- `--server-hosts` accepts a comma-separated manual endpoint list and picks the first reachable endpoint at startup.
 - The script writes Deskflow files under `~/.config/deskflow`.
 - With `--autostart`, it installs either a user `systemd` service (Linux) or a LaunchAgent (macOS).
-- Ensure TCP `24800` is reachable from client to server.
+- Ensure TCP `24800` and UDP `24801` are reachable from client to server.
 
 ### Integrate Deskflow Into UnixDrop Services
 
