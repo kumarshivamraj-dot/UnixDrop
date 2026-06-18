@@ -147,6 +147,7 @@ def status_lines() -> list[str]:
     lines.append(f"Local node service running: {'yes' if service_ok else 'no'} ({service_detail})")
     lines.append(f"Peer receiver reachable: {'yes' if receiver_ok else 'no'} ({detail})")
     lines.append(f"Peer receiver version: {health_payload.get('version', 'unknown')}")
+    lines.append(f"peer hostname: {health_payload.get('hostname', 'unknown')}")
     lines.append(f"auto_open_links: {health_payload.get('auto_open_links', CONFIG.auto_open_links)}")
     lines.append(f"clipboard_mode: {health_payload.get('clipboard_mode', CONFIG.clipboard_mode)}")
     lines.append(f"local drop folder: {CONFIG.drop_dir}")

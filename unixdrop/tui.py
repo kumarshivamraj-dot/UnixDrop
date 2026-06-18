@@ -137,6 +137,71 @@ def _apply_client_server_hosts(server_hosts: str) -> tuple[bool, str]:
     return False, f"failed to save endpoints: {detail}"
 
 
+def _update_quick_setup_config(role: str) -> tuple[bool, str]:
+    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
+    if not config_path.exists():
+        return False, f"unixdrop config missing: {config_path}"
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        clipboard = raw.get("clipboard") if isinstance(raw.get("clipboard"), dict) else {}
+        clipboard["mode"] = "two_way"
+        raw["clipboard"] = clipboard
+        deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
+        deskflow.update(
+            {
+                "enabled": True,
+                "role": role,
+                "server_start_script": "~/.config/deskflow/start-deskflow-server.sh",
+                "client_start_script": "~/.config/deskflow/start-deskflow-client.sh",
+            }
+        )
+        raw["deskflow"] = deskflow
+        config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:
+        return False, f"failed to update unixdrop config: {exc}"
+    return True, f"saved {role} role and enabled two-way clipboard"
+
+
+def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
+    script = _project_dir() / "scripts" / "configure_deskflow.sh"
+    if sys.platform == "darwin":
+        role = "server"
+        client_name = peer_hostname.strip()
+        if not client_name or client_name == "unknown":
+            client_name = "thinkpad"
+        command = [
+            str(script),
+            "--role",
+            role,
+            "--client-name",
+            client_name,
+            "--direction",
+            "right",
+        ]
+    elif sys.platform.startswith("linux"):
+        role = "client"
+        command = [
+            str(script),
+            "--role",
+            role,
+            "--client-name",
+            _default_client_name(),
+        ]
+    else:
+        return False, f"automatic setup is unsupported on {sys.platform}"
+
+    ok, detail = _run_command(command)
+    if not ok:
+        return False, f"Deskflow setup failed: {detail}"
+    config_ok, config_detail = _update_quick_setup_config(role)
+    if not config_ok:
+        return False, config_detail
+    started, start_detail = _start_deskflow_now()
+    if not started:
+        return False, f"{config_detail}; {start_detail}"
+    return True, f"ready as {role}; {start_detail}"
+
+
 def _first_endpoint_host(server_hosts: str) -> str:
     for raw in server_hosts.split(","):
         endpoint = raw.strip()
@@ -412,7 +477,7 @@ def _render(
     print(_cyan("Deskbridge TUI"))
     print(
         f"Updated: {snapshot_time} | refresh={interval:.1f}s | "
-        "keys: q quit, e edit endpoints, d start deskflow, r reverse deskflow, o open drop"
+        "keys: s quick setup, q quit, e endpoints, d start deskflow, r reverse, o open drop"
     )
     print("")
 
@@ -482,6 +547,10 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                     message = f"{detail} | {recv_detail}"
                     if not recv_ok:
                         message = f"{detail} | warning: {recv_detail}"
+                continue
+            if key.lower() == "s":
+                ok, detail = _quick_setup_deskflow(status.get("peer hostname", ""))
+                message = detail if ok else f"error: {detail}"
                 continue
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -348,6 +349,7 @@ class UnixDropHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "version": __version__,
+                    "hostname": socket.gethostname(),
                     "auto_open_links": CONFIG.auto_open_links,
                     "clipboard_mode": CONFIG.clipboard_mode,
                 },

@@ -8,11 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 from unixdrop.cli import (
-<<<<<<< HEAD
     _cmd_url,
-=======
     _cmd_deskflow,
->>>>>>> 35867e6 (v020)
     _drop_destination,
     _send_file_to_receiver,
     _stage_drop_files,

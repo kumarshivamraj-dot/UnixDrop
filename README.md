@@ -74,15 +74,12 @@ Run from repo root:
 
 TUI keys:
 
+- `s`: quick setup (Mac server, Linux client, automatic discovery, two-way clipboard)
 - `q`: quit
 - `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
 - `d`: start Deskflow using configured start script
-<<<<<<< HEAD
-- `o`: open the local drop folder
-=======
 - `r`: reverse Deskflow role using the opposite configured start script
-- `o`: open the Drop to ThinkPad folder
->>>>>>> 35867e6 (v020)
+- `o`: open the local drop folder
 
 If Deskflow gets stuck in duplicate client loops (`already connected`), run:
 

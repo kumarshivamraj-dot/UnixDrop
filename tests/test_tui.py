@@ -13,15 +13,56 @@ from unixdrop.tui import (
     _first_endpoint_host,
     _open_drop_folder_now,
     _parse_health,
+    _quick_setup_deskflow,
     _restart_deskflow_client_now,
     _start_local_receiver_now,
     _start_linux_receiver_now,
     _swap_deskflow_role_now,
     _sync_receiver_endpoint,
+    _update_quick_setup_config,
 )
 
 
 class TuiTests(unittest.TestCase):
+    def test_quick_setup_config_enables_clipboard_and_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({"auth_token": "token", "clipboard": {"mode": "off"}}))
+            with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
+                ok, detail = _update_quick_setup_config("client")
+
+            self.assertTrue(ok, detail)
+            payload = json.loads(config_path.read_text())
+            self.assertEqual(payload["clipboard"]["mode"], "two_way")
+            self.assertEqual(payload["deskflow"]["role"], "client")
+            self.assertTrue(payload["deskflow"]["enabled"])
+
+    @patch("unixdrop.tui._start_deskflow_now", return_value=(True, "started"))
+    @patch("unixdrop.tui._update_quick_setup_config", return_value=(True, "saved"))
+    @patch("unixdrop.tui._run_command", return_value=(True, "ok"))
+    @patch("unixdrop.tui.sys.platform", "darwin")
+    def test_quick_setup_mac_uses_peer_hostname(self, run_mock, _config_mock, _start_mock) -> None:
+        ok, detail = _quick_setup_deskflow("thinkpad.local")
+
+        self.assertTrue(ok, detail)
+        command = run_mock.call_args.args[0]
+        self.assertIn("server", command)
+        self.assertIn("thinkpad.local", command)
+        self.assertIn("right", command)
+
+    @patch("unixdrop.tui._start_deskflow_now", return_value=(True, "started"))
+    @patch("unixdrop.tui._update_quick_setup_config", return_value=(True, "saved"))
+    @patch("unixdrop.tui._default_client_name", return_value="thinkpad")
+    @patch("unixdrop.tui._run_command", return_value=(True, "ok"))
+    @patch("unixdrop.tui.sys.platform", "linux")
+    def test_quick_setup_linux_uses_discovery(self, run_mock, _name_mock, _config_mock, _start_mock) -> None:
+        ok, detail = _quick_setup_deskflow()
+
+        self.assertTrue(ok, detail)
+        command = run_mock.call_args.args[0]
+        self.assertIn("client", command)
+        self.assertNotIn("--server-ip", command)
+
     def test_parse_health_rows(self) -> None:
         rows = _parse_health(
             [
