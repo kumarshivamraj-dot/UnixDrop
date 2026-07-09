@@ -10,42 +10,44 @@ from pathlib import Path
 from urllib import request
 from urllib.error import URLError
 
-from unixdrop.config import load_config
+from unixdrop.config import AppConfig, load_config
 from unixdrop.vault import build_manifest
 
 
-CONFIG = load_config()
-STATE_FILE = CONFIG.state_dir / "mac_state.json"
+def _state_file(config: AppConfig | None = None) -> Path:
+    cfg = config or load_config()
+    return cfg.state_dir / "mac_state.json"
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _read_state() -> dict:
-    if not STATE_FILE.exists():
+def _read_state(state_file: Path | None = None, config: AppConfig | None = None) -> dict:
+    path = state_file or _state_file(config)
+    if not path.exists():
         return {}
     try:
-        loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _fetch_json(path: str) -> dict:
+def _fetch_json(cfg: AppConfig, path: str) -> dict:
     req = request.Request(
-        CONFIG.receiver_url.rstrip("/") + path,
-        headers={"Authorization": f"Bearer {CONFIG.auth_token}"},
+        cfg.receiver_url.rstrip("/") + path,
+        headers={"Authorization": f"Bearer {cfg.auth_token}"},
     )
-    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
+    with request.urlopen(req, timeout=cfg.request_timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def _check_health() -> tuple[bool, dict, str, float | None]:
+def _check_health(cfg: AppConfig) -> tuple[bool, dict, str, float | None]:
     started = time.perf_counter()
     try:
-        req = request.Request(CONFIG.receiver_url.rstrip("/") + "/health")
-        with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
+        req = request.Request(cfg.receiver_url.rstrip("/") + "/health")
+        with request.urlopen(req, timeout=cfg.request_timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
         latency_ms = (time.perf_counter() - started) * 1000.0
         return bool(payload.get("ok")), payload, "reachable", latency_ms
@@ -105,19 +107,19 @@ def _check_local_node_service() -> tuple[bool, str]:
     return False, f"unsupported platform: {sys.platform}"
 
 
-def _pending_drop_files() -> int:
-    if not CONFIG.drop_dir.exists():
+def _pending_drop_files(cfg: AppConfig) -> int:
+    if not cfg.drop_dir.exists():
         return 0
-    return sum(1 for path in CONFIG.drop_dir.iterdir() if path.is_file())
+    return sum(1 for path in cfg.drop_dir.iterdir() if path.is_file())
 
 
-def _vault_status(state: dict) -> list[str]:
-    if not CONFIG.obsidian_enabled:
+def _vault_status(cfg: AppConfig, state: dict, state_file: Path) -> list[str]:
+    if not cfg.obsidian_enabled:
         return ["obsidian sync enabled: false"]
 
-    local_entries = {entry.path: entry for entry in build_manifest(CONFIG.obsidian_vault_dir, CONFIG)}
+    local_entries = {entry.path: entry for entry in build_manifest(cfg.obsidian_vault_dir, cfg)}
     try:
-        remote_manifest = _fetch_json("/api/vault/manifest")
+        remote_manifest = _fetch_json(cfg, "/api/vault/manifest")
     except Exception as exc:
         return [
             "obsidian sync enabled: true",
@@ -141,7 +143,7 @@ def _vault_status(state: dict) -> list[str]:
         ),
     ]
 
-    last_sync_epoch = STATE_FILE.stat().st_mtime if STATE_FILE.exists() else None
+    last_sync_epoch = state_file.stat().st_mtime if state_file.exists() else None
     lines.append(f"last state write: {_format_age(last_sync_epoch)}")
 
     known = state.get("vault", {})
@@ -149,9 +151,15 @@ def _vault_status(state: dict) -> list[str]:
     return lines
 
 
-def status_lines() -> list[str]:
-    state = _read_state()
-    receiver_ok, health_payload, detail, latency_ms = _check_health()
+def status_lines(config: AppConfig | None = None, config_path: Path | None = None) -> list[str]:
+    try:
+        cfg = config or load_config(config_path)
+    except Exception as exc:
+        return ["Deskbridge status", f"Config load: {exc}"]
+
+    state_file = _state_file(cfg)
+    state = _read_state(state_file)
+    receiver_ok, health_payload, detail, latency_ms = _check_health(cfg)
     service_ok, service_detail = _check_local_node_service()
 
     lines = ["Deskbridge status"]
@@ -160,18 +168,29 @@ def status_lines() -> list[str]:
     lines.append(f"Peer receiver latency: {_format_latency(latency_ms)}")
     lines.append(f"Peer receiver version: {health_payload.get('version', 'unknown')}")
     lines.append(f"peer hostname: {health_payload.get('hostname', 'unknown')}")
-    lines.append(f"auto_open_links: {health_payload.get('auto_open_links', CONFIG.auto_open_links)}")
-    lines.append(f"clipboard_mode: {health_payload.get('clipboard_mode', CONFIG.clipboard_mode)}")
-    lines.append(f"deskflow_enabled: {'yes' if CONFIG.deskflow_enabled else 'no'}")
-    lines.append(f"deskflow_role: {CONFIG.deskflow_role}")
-    lines.append(f"local drop folder: {CONFIG.drop_dir}")
-    lines.append(f"local inbox: {CONFIG.inbox_dir}")
-    lines.append(f"pending files in drop folder: {_pending_drop_files()}")
+    lines.append(f"auto_open_links: {health_payload.get('auto_open_links', cfg.auto_open_links)}")
+    lines.append(f"clipboard_mode: {health_payload.get('clipboard_mode', cfg.clipboard_mode)}")
+    lines.append(f"deskflow_enabled: {'yes' if cfg.deskflow_enabled else 'no'}")
+    lines.append(f"deskflow_role: {cfg.deskflow_role}")
+    lines.append(f"local drop folder: {cfg.drop_dir}")
+    lines.append(f"local inbox: {cfg.inbox_dir}")
+    lines.append(f"pending files in drop folder: {_pending_drop_files(cfg)}")
     lines.append(f"last upload result: {state.get('last_upload_result', 'none')}")
 
-    lines.extend(_vault_status(state))
+    lines.extend(_vault_status(cfg, state, state_file))
     lines.append("Mouse/keyboard sharing is managed by Deskflow when deskflow.role is configured.")
     return lines
+
+
+def status_report(config: AppConfig | None = None, config_path: Path | None = None) -> dict:
+    lines = status_lines(config=config, config_path=config_path)
+    details: dict[str, str] = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        details[key.strip()] = value.strip()
+    return {"ok": "Config load" not in details, "lines": lines, "details": details}
 
 
 def main() -> None:

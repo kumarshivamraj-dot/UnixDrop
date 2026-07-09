@@ -1,12 +1,12 @@
 # UnixDrop
 
-UnixDrop is a small **desk bridge** between a MacBook and a Linux ThinkPad.
+UnixDrop is a small **desk bridge** between two macOS/Linux machines.
 
 The architecture stays simple:
 
 - **UnixDrop Node** runs on both machines.
 - Each node accepts incoming files/links/clipboard over HTTP and watches a local drop folder to send to its peer.
-- Deskflow server/client roles are configured separately, so either MacBook or ThinkPad can own the keyboard/mouse.
+- Deskflow server/client roles are configured separately, so either machine can own the keyboard/mouse.
 
 This project does **not** implement mouse/keyboard sharing directly. Use Deskflow (or another software KVM) for HID.
 
@@ -29,55 +29,115 @@ Make both machines feel like one desk:
 
 ## Install
 
-### Linux node
+### Package install
 
-1. Put this repo on Linux.
-2. Create `~/.config/unixdrop/config.json` from `config.example.json`.
-3. Install service:
+UnixDrop is a Python CLI package. Install it on both machines:
 
 ```bash
-./scripts/install_linux_service.sh
-systemctl --user enable --now unixdrop-receiver.service
+pipx install .
 ```
 
-### macOS node
-
-1. Put this repo on macOS.
-2. Create `~/.config/unixdrop/config.json` from `config.example.json`.
-3. Install service:
+For development from a checkout:
 
 ```bash
-./scripts/install_mac_agent.sh
-launchctl load ~/Library/LaunchAgents/com.unixdrop.agent.plist
+python3 -m pip install -e .
 ```
+
+Create the first config on each machine:
+
+```bash
+deskbridge init
+```
+
+For a guided first-run pass that creates or updates config, attempts LAN discovery, probes the peer receiver, and prints the next commands:
+
+```bash
+deskbridge setup
+deskbridge setup --peer-url http://192.168.1.50:8765 --clipboard two_way --role client --autostart
+```
+
+Edit `~/.config/unixdrop/config.json` on each machine:
+
+- Set the same `auth_token` on both machines.
+- Set `receiver_url` to the other machine, for example `http://192.168.1.50:8765`.
+- Adjust `inbox_dir` and `drop_dir` if you want different folders.
+
+Start or refresh the local background service:
+
+```bash
+deskbridge up
+```
+
+On Linux this writes a user systemd service and runs `systemctl --user enable --now unixdrop-receiver.service`.
+On macOS this writes `~/Library/LaunchAgents/com.unixdrop.agent.plist` and loads it with `launchctl`.
+
+Host tools still come from the operating system: Deskflow for mouse/keyboard sharing, `pbcopy`/`pbpaste` on macOS, and one of `wl-copy`/`wl-paste`, `xclip`, or `xsel` for Linux clipboard support.
+
+## Development
+
+Run the test suite:
+
+```bash
+make test
+```
+
+Run the full local CI gate:
+
+```bash
+make ci
+```
+
+Run an installed-package smoke test:
+
+```bash
+make package-smoke
+```
+
+Clean generated build/test artifacts:
+
+```bash
+make clean-artifacts
+```
+
+Local runtime files stay out of version control. Keep real configs, inbox contents, link logs, backup configs, build directories, and Python cache files local; use `config.example.json` for committed config examples.
 
 ## Commands
 
-Run from repo root:
+After install:
 
 ```bash
-./deskbridge up
-./deskbridge tab
-./deskbridge tab --browser safari
-./deskbridge tab --no-open
-./deskbridge url https://example.com
-./deskbridge status
-./deskbridge health
-./deskbridge tui
-./deskbridge drop
-./deskbridge drop ~/Downloads/report.pdf
-./deskbridge dropzone
-./deskbridge clean
-./deskbridge deskflow --role server --client-name thinkpad --direction right
-./deskbridge deskflow --role client --client-name thinkpad
+deskbridge init
+deskbridge setup
+deskbridge up
+deskbridge tab
+deskbridge tab --browser safari
+deskbridge tab --browser firefox
+deskbridge tab --browser firefox --firefox-debug-url http://127.0.0.1:9222
+deskbridge tab --no-open
+deskbridge url https://example.com
+deskbridge status
+deskbridge status --json
+deskbridge health
+deskbridge health --json
+deskbridge doctor
+deskbridge doctor --json
+deskbridge tui
+deskbridge drop
+deskbridge drop ~/Downloads/report.pdf
+deskbridge dropzone
+deskbridge clean
+deskbridge deskflow --role server --client-name peer-laptop --direction right
+deskbridge deskflow --role client --client-name peer-laptop
 ```
+
+The checked-out source tree still includes `./deskbridge` and `./scripts/*.sh` wrappers for compatibility.
 
 TUI keys:
 
 - `s`: quick setup (Mac server, Linux client, automatic discovery, two-way clipboard)
 - `q`: close only the dashboard; background services keep running
 - `x`: stop all UnixDrop, Deskflow, discovery, and receiver background processes
-- `e`: enter/update Deskflow server endpoints (LAN first, fallback next)
+- `e`: enter/update Deskflow server endpoints; blank input uses LAN discovery only
 - `d`: start Deskflow using configured start script
 - `r`: reverse Deskflow role using the opposite configured start script
 - `o`: open the local drop folder
@@ -85,12 +145,12 @@ TUI keys:
 If Deskflow gets stuck in duplicate client loops (`already connected`), run:
 
 ```bash
-./deskbridge clean
+deskbridge clean
 ```
 
 This unloads conflicting autostarts and kills stale Deskflow/Barrier processes.
 
-Compatibility wrappers:
+Source checkout compatibility wrappers:
 
 ```bash
 ./scripts/send_current_tab.sh
@@ -140,25 +200,25 @@ You can also install distro-native packages or direct release assets from:
 
 ## Deskflow Keyboard/Mouse Setup
 
-Use the included setup script on each machine:
+Use the installed command on each machine:
 
 1. On the machine that owns the keyboard/mouse (server):
 
 ```bash
-./scripts/configure_deskflow.sh --role server --client-name thinkpad --direction right --autostart
+deskbridge deskflow --role server --client-name peer-laptop --direction right --autostart
 ```
 
 2. On the other machine (client):
 
 ```bash
-./scripts/configure_deskflow.sh --role client --autostart
+deskbridge deskflow --role client --autostart
 ```
 
-Equivalent `deskbridge` commands:
+The source checkout also includes an equivalent helper script:
 
 ```bash
-./deskbridge deskflow --role server --client-name thinkpad --direction right --autostart
-./deskbridge deskflow --role client --client-name thinkpad --autostart
+./scripts/configure_deskflow.sh --role server --client-name peer-laptop --direction right --autostart
+./scripts/configure_deskflow.sh --role client --autostart
 ```
 
 No IP address is stored in the default setup. The server answers UnixDrop LAN discovery on UDP 24801; the client discovers it at every start and caches the last working address. DHCP address changes therefore require no reconfiguration.
@@ -166,14 +226,14 @@ No IP address is stored in the default setup. The server answers UnixDrop LAN di
 For networks that block broadcast/multicast discovery, fixed LAN/Tailscale fallbacks remain available:
 
 ```bash
-./scripts/configure_deskflow.sh --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --autostart
+deskbridge deskflow --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --autostart
 ```
 
 Verify each side after setup:
 
 ```bash
-./scripts/configure_deskflow.sh --role server --verify
-./scripts/configure_deskflow.sh --role client --verify
+deskbridge deskflow --role server --verify
+deskbridge deskflow --role client --verify
 ```
 
 Notes:
@@ -181,7 +241,7 @@ Notes:
 - `--direction` is where the client is positioned relative to the server (`right|left|up|down`).
 - Client setup uses automatic LAN discovery when neither `--server-ip` nor `--server-hosts` is supplied.
 - `--server-hosts` accepts a comma-separated manual endpoint list and picks the first reachable endpoint at startup.
-- The script writes Deskflow files under `~/.config/deskflow`.
+- The setup command writes Deskflow files under `~/.config/deskflow`.
 - With `--autostart`, it installs either a user `systemd` service (Linux) or a LaunchAgent (macOS).
 - Ensure TCP `24800` and UDP `24801` are reachable from client to server.
 
@@ -233,10 +293,10 @@ They are mapped to `clipboard_mode` with a deprecation warning.
 
 Defaults:
 
-- local drop folder: `~/Drop to ThinkPad`
-- local inbox: `~/Inbox/MacDrop`
+- starter config drop folder: `~/UnixDrop/Drop`
+- starter config inbox: `~/UnixDrop/Inbox`
 
-You can override these per machine in config, for example `~/Drop to Mac` on the ThinkPad and `~/Inbox/ThinkPadDrop` on the Mac.
+You can override these per machine in config, for example `~/Drop to Peer` and `~/UnixDrop/Inbox`.
 
 Behavior:
 
@@ -245,19 +305,19 @@ Behavior:
 - Run `deskbridge dropzone` for a local browser page with a boxed drag-and-drop target.
 - Drag files into the drop folder, or stage files from a terminal:
   ```bash
-  ./deskbridge drop ~/Downloads/report.pdf
+  deskbridge drop ~/Downloads/report.pdf
   ```
 - Send a file directly to any running UnixDrop receiver:
   ```bash
-  ./deskbridge send ~/Downloads/report.pdf --to http://<receiver-ip>:8765
+  deskbridge send ~/Downloads/report.pdf --to http://<receiver-ip>:8765
   ```
 - Run a receiver manually on a machine:
   ```bash
-  ./deskbridge receive
+  deskbridge receive
   ```
 - Create a watched folder on the current machine that sends to another receiver:
   ```bash
-  ./deskbridge dropwatch --folder ~/Drop\ to\ Peer --to http://<peer-ip>:8765
+  deskbridge dropwatch --folder ~/Drop\ to\ Peer --to http://<peer-ip>:8765
   ```
 - The UnixDrop node watches the configured drop folder.
 - Upload waits until file appears stable (not still writing).
@@ -270,7 +330,7 @@ Behavior:
 
 ## Tab Send Workflow
 
-`deskbridge tab` reads the active URL from supported macOS browsers:
+`deskbridge tab` reads the active URL from supported browser sources:
 
 - Safari
 - Google Chrome
@@ -278,20 +338,52 @@ Behavior:
 - Brave
 - Chromium
 - Microsoft Edge
+- Firefox (requires opt-in debug endpoint)
+- Firefox Developer Edition (requires opt-in debug endpoint)
+- LibreWolf (requires opt-in debug endpoint)
 - Vivaldi
 - Opera
+
+Firefox-family browsers do not expose the active tab through the same AppleScript API as Safari/Chromium browsers. UnixDrop supports them through a non-intrusive local debug endpoint and will fail instead of guessing if multiple tabs are exposed without an active marker.
+
+Start Firefox with a local debugging port before using `deskbridge tab --browser firefox`:
+
+```bash
+firefox --remote-debugging-port 9222
+```
+
+On macOS, if `firefox` is not on `PATH`, run the app binary directly:
+
+```bash
+/Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port 9222
+```
+
+The default endpoint is `http://127.0.0.1:9222`. Override it in config:
+
+```json
+"tabs": {
+  "default_browser": "firefox",
+  "firefox_debug_url": "http://127.0.0.1:9222"
+}
+```
+
+Or per command:
+
+```bash
+deskbridge tab --browser firefox --firefox-debug-url http://127.0.0.1:9222
+```
 
 For either machine, send an explicit URL:
 
 ```bash
-./deskbridge url https://example.com
-./deskbridge url https://example.com --to http://<peer-ip>:8765
+deskbridge url https://example.com
+deskbridge url https://example.com --to http://<peer-ip>:8765
 ```
 
 Receiver behavior:
 
 - If `auto_open_links=true` and no `--no-open`, URL opens via `open` on macOS or `xdg-open` on Linux.
-- Otherwise URL is appended to `~/Inbox/MacDrop/links.md`.
+- Otherwise URL is appended to `links.md` in the configured inbox.
 
 ## Status and Health
 
@@ -318,6 +410,15 @@ Receiver behavior:
 - local active-tab script availability
 - drop folder existence
 - launchd/systemd status checks (when available)
+
+`deskbridge doctor` is read-only and checks local portability prerequisites:
+
+- Python executable used by generated services
+- config file/load status
+- launchd or systemd availability
+- link opener and clipboard tools
+- Deskflow binary detection
+- Firefox debug endpoint when configured
 
 ## Obsidian Sync
 
@@ -356,7 +457,11 @@ Recommended setup:
 - Only URLs can auto-open (`open` on macOS, `xdg-open` on Linux) when enabled.
 - File uploads are size-limited and filename-sanitized.
 
--- Todo
+## Release Checklist
 
-extend the support for firefox
-Drag and drop
+- Run `make test`.
+- Run `make package-smoke`.
+- Run `make clean-artifacts`.
+- Run `deskbridge doctor` on one macOS node and one Linux node after install.
+- Confirm `git status --short` shows only intentional source, docs, and test changes.
+- Install from the release artifact or checkout on one macOS node and one Linux node before tagging.

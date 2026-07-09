@@ -11,8 +11,6 @@
     <string>-m</string>
     <string>unixdrop.node</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>__PROJECT_DIR__</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

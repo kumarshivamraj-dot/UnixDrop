@@ -5,6 +5,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 DEFAULT_CONFIG_PATH = Path("~/.config/unixdrop/config.json").expanduser()
@@ -31,9 +32,9 @@ class AppConfig:
     listen_host: str = "0.0.0.0"
     port: int = 8765
     receiver_url: str = "http://127.0.0.1:8765"
-    inbox_dir: Path = Path("~/Inbox/MacDrop").expanduser()
-    drop_dir: Path = Path("~/Drop to ThinkPad").expanduser()
-    link_log_path: Path = Path("~/Inbox/MacDrop/link-log.jsonl").expanduser()
+    inbox_dir: Path = Path("~/UnixDrop/Inbox").expanduser()
+    drop_dir: Path = Path("~/UnixDrop/Drop").expanduser()
+    link_log_path: Path = Path("~/UnixDrop/Inbox/link-log.jsonl").expanduser()
     state_dir: Path = Path("~/.local/state/unixdrop").expanduser()
     auto_open_links: bool = True
     clipboard_mode: str = "off"
@@ -44,6 +45,7 @@ class AppConfig:
     delete_after_send: bool = False
     max_file_mb: int = 500
     tabs_default_browser: str = "auto"
+    tabs_firefox_debug_url: str = "http://127.0.0.1:9222"
     obsidian_enabled: bool = False
     obsidian_vault_dir: Path = Path("~/Obsidian/MainVault").expanduser()
     obsidian_remote_vault: str = ""
@@ -76,6 +78,57 @@ def _warn(message: str) -> None:
     print(f"[unixdrop config] {message}", file=sys.stderr)
 
 
+def _require_positive_int(raw: object, name: str, *, minimum: int = 1, maximum: int | None = None) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+    return value
+
+
+def _require_nonempty_string(raw: object, name: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError(f"{name} must not be empty")
+    if "\x00" in value:
+        raise ValueError(f"{name} must not contain NUL bytes")
+    return value
+
+
+def _validate_receiver_url(raw: object) -> str:
+    value = _require_nonempty_string(raw, "receiver_url")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("receiver_url must be an http(s) URL with a host")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"receiver_url has invalid port: {exc}") from None
+    return value
+
+
+def _validate_path(value: Path, name: str) -> Path:
+    if "\x00" in str(value):
+        raise ValueError(f"{name} must not contain NUL bytes")
+    return value
+
+
+def _placeholder_token(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized in {
+        "changeme",
+        "change-me",
+        "change_me",
+        "replace-me",
+        "default-token",
+        "replace-with-the-same-random-token-on-both-machines",
+    }
+
+
 def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
     flat = dict(raw)
     warnings: list[str] = []
@@ -97,6 +150,8 @@ def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
         flat["port"] = receiver["port"]
     if "auto_open_links" in receiver and "auto_open_links" not in flat:
         flat["auto_open_links"] = receiver["auto_open_links"]
+    if "inbox_dir" in receiver and "inbox_dir" not in flat:
+        flat["inbox_dir"] = receiver["inbox_dir"]
     if "linux_inbox" in receiver and "inbox_dir" not in flat:
         flat["inbox_dir"] = receiver["linux_inbox"]
 
@@ -114,6 +169,8 @@ def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
 
     if "default_browser" in tabs and "tabs_default_browser" not in flat:
         flat["tabs_default_browser"] = tabs["default_browser"]
+    if "firefox_debug_url" in tabs and "tabs_firefox_debug_url" not in flat:
+        flat["tabs_firefox_debug_url"] = tabs["firefox_debug_url"]
 
     if "enabled" in obsidian and "obsidian_enabled" not in flat:
         flat["obsidian_enabled"] = obsidian["enabled"]
@@ -164,9 +221,10 @@ def _flatten_config(raw: dict) -> tuple[dict, list[str]]:
 
 def _apply_paths(raw: dict) -> dict:
     converted = dict(raw)
-    converted["inbox_dir"] = Path(raw.get("inbox_dir", "~/Inbox/MacDrop")).expanduser()
-    converted["drop_dir"] = Path(raw.get("drop_dir", "~/Drop to ThinkPad")).expanduser()
-    converted["link_log_path"] = Path(raw.get("link_log_path", "~/Inbox/MacDrop/link-log.jsonl")).expanduser()
+    converted["inbox_dir"] = Path(raw.get("inbox_dir", "~/UnixDrop/Inbox")).expanduser()
+    converted["drop_dir"] = Path(raw.get("drop_dir", "~/UnixDrop/Drop")).expanduser()
+    default_link_log = converted["inbox_dir"] / "link-log.jsonl"
+    converted["link_log_path"] = Path(raw.get("link_log_path", default_link_log)).expanduser()
     converted["state_dir"] = Path(raw.get("state_dir", "~/.local/state/unixdrop")).expanduser()
     converted["obsidian_vault_dir"] = Path(raw.get("obsidian_vault_dir", "~/Obsidian/MainVault")).expanduser()
     converted["deskflow_server_start_script"] = Path(
@@ -189,24 +247,55 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     path = (config_path or (Path(env_path) if env_path else DEFAULT_CONFIG_PATH)).expanduser()
     if not path.exists():
         raise FileNotFoundError(
-            f"Config file not found: {path}. Copy config.example.json to this path first."
+            f"Config file not found: {path}. Run `deskbridge init` to create one, "
+            "or copy config.example.json to this path first."
         )
 
-    loaded = json.loads(path.read_text())
+    loaded = json.loads(path.read_text(encoding="utf-8"))
     flattened, warnings = _flatten_config(loaded)
     prepared = _apply_paths(flattened)
 
+    prepared["auth_token"] = _require_nonempty_string(prepared.get("auth_token", ""), "auth_token")
+    prepared["receiver_url"] = _validate_receiver_url(prepared.get("receiver_url", ""))
+    prepared["listen_host"] = _require_nonempty_string(prepared.get("listen_host", "0.0.0.0"), "listen_host")
+    prepared["port"] = _require_positive_int(prepared.get("port", 8765), "port", maximum=65535)
+    prepared["clipboard_poll_seconds"] = _require_positive_int(
+        prepared.get("clipboard_poll_seconds", 2),
+        "clipboard_poll_seconds",
+    )
+    prepared["file_poll_seconds"] = _require_positive_int(
+        prepared.get("file_poll_seconds", 5),
+        "file_poll_seconds",
+    )
+    prepared["request_timeout_seconds"] = _require_positive_int(
+        prepared.get("request_timeout_seconds", 15),
+        "request_timeout_seconds",
+    )
+    prepared["obsidian_poll_seconds"] = _require_positive_int(
+        prepared.get("obsidian_poll_seconds", 10),
+        "obsidian_poll_seconds",
+    )
     prepared["clipboard_mode"] = parse_clipboard_mode(prepared.get("clipboard_mode", "off"))
     prepared["deskflow_role"] = parse_deskflow_role(prepared.get("deskflow_role", "off"))
-    prepared["max_clipboard_chars"] = int(prepared.get("max_clipboard_chars", 20000))
-    prepared["max_file_mb"] = int(prepared.get("max_file_mb", 500))
+    prepared["max_clipboard_chars"] = _require_positive_int(
+        prepared.get("max_clipboard_chars", 20000),
+        "max_clipboard_chars",
+    )
+    prepared["max_file_mb"] = _require_positive_int(prepared.get("max_file_mb", 500), "max_file_mb")
     prepared["obsidian_conflict_strategy"] = str(prepared.get("obsidian_conflict_strategy", "copy"))
+    prepared["inbox_dir"] = _validate_path(prepared["inbox_dir"], "inbox_dir")
+    prepared["drop_dir"] = _validate_path(prepared["drop_dir"], "drop_dir")
+    prepared["link_log_path"] = _validate_path(prepared["link_log_path"], "link_log_path")
+    prepared["state_dir"] = _validate_path(prepared["state_dir"], "state_dir")
+    prepared["obsidian_vault_dir"] = _validate_path(prepared["obsidian_vault_dir"], "obsidian_vault_dir")
 
     allowed = set(AppConfig.__dataclass_fields__.keys())
     filtered = {key: value for key, value in prepared.items() if key in allowed}
 
     for warning in warnings:
         _warn(warning)
+    if str(filtered.get("listen_host")) in {"0.0.0.0", "::"} and _placeholder_token(str(filtered["auth_token"])):
+        _warn("receiver listens on all interfaces with a placeholder auth_token; generate a unique token.")
 
     return AppConfig(**filtered)
 

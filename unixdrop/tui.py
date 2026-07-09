@@ -18,14 +18,13 @@ from statistics import pstdev
 from urllib.parse import urlparse
 
 from unixdrop.config import DEFAULT_CONFIG_PATH, ENV_CONFIG_PATH, deskflow_start_script, load_config
+from unixdrop.deskflow_setup import main as deskflow_setup_main
 from unixdrop.health import health_lines
 from unixdrop.status import status_lines
 
 
 HEALTH_RE = re.compile(r"^\[(ok|fail)\]\s+(.+?):\s*(.*)$")
 LATENCY_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*ms$", re.IGNORECASE)
-DEFAULT_TUI_SERVER_HOSTS = "100.76.14.117:24800"
-DEFAULT_TUI_RECEIVER_URL = "http://100.118.15.70:8765"
 
 
 def _parse_health(lines: list[str]) -> list[tuple[bool, str, str]]:
@@ -111,10 +110,6 @@ def _prompt_line(prompt: str) -> str:
         tty.setcbreak(fd)
 
 
-def _project_dir() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
 def _default_client_name() -> str:
     result = subprocess.run(["hostname"], capture_output=True, text=True, check=False)
     name = result.stdout.strip()
@@ -192,6 +187,58 @@ def _panel_lines(title: str, body: list[str]) -> list[str]:
     return lines
 
 
+def _terminal_width(default: int = 88) -> int:
+    try:
+        return os.get_terminal_size().columns
+    except OSError:
+        return default
+
+
+def _truncate_middle(value: str, width: int) -> str:
+    text = str(value)
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    left = (width - 3) // 2
+    right = width - 3 - left
+    return f"{text[:left]}...{text[-right:]}"
+
+
+def _drop_queue_summary(pending_value: str) -> str:
+    text = str(pending_value).strip() or "unknown"
+    try:
+        pending_count = int(text)
+    except ValueError:
+        return text
+    if pending_count == 0:
+        return "idle - no files waiting"
+    if pending_count == 1:
+        return "1 file waiting"
+    return f"{pending_count} files waiting"
+
+
+def _drop_panel_lines(status: dict[str, str], width: int | None = None) -> list[str]:
+    panel_width = width or min(max(_terminal_width(), 72), 104)
+    title = "drop to peer"
+    panel_width = max(panel_width, 56, len(title) + 4)
+    label_width = 11
+    value_width = panel_width - label_width - 6
+    rows = [
+        ("drop folder", status.get("local drop folder", "unknown")),
+        ("local inbox", status.get("local inbox", "unknown")),
+        ("queue", _drop_queue_summary(status.get("pending files in drop folder", "unknown"))),
+        ("last upload", status.get("last upload result", "none")),
+    ]
+
+    lines = [f"+-{title.ljust(panel_width - 4, '-')}-+"]
+    for label, raw_value in rows:
+        value = _truncate_middle(str(raw_value), value_width)
+        lines.append(f"| {label:<{label_width}}  {value:<{value_width}} |")
+    lines.append(f"+{'-' * (panel_width - 2)}+")
+    return lines
+
+
 def _center_badges(badges: list[str], width: int) -> str:
     text = "  ".join(badges)
     if len(text) >= width:
@@ -210,22 +257,41 @@ def _run_command(command: list[str]) -> tuple[bool, str]:
     return False, detail
 
 
+def _run_deskflow_setup(command_args: list[str]) -> tuple[bool, str]:
+    try:
+        result = deskflow_setup_main(command_args)
+    except SystemExit as exc:
+        code = exc.code
+        if code in (None, 0):
+            return True, "ok"
+        return False, str(exc) or f"exit code {code}"
+    except Exception as exc:
+        return False, str(exc)
+    if result in (None, 0):
+        return True, "ok"
+    return False, f"exit code {result}"
+
+
 def _apply_client_server_hosts(server_hosts: str) -> tuple[bool, str]:
-    project_dir = _project_dir()
-    script = project_dir / "scripts" / "configure_deskflow.sh"
+    endpoints = server_hosts.strip()
     command = [
-        str(script),
         "--role",
         "client",
-        "--server-hosts",
-        server_hosts,
-        "--client-name",
-        _default_client_name(),
-        "--autostart",
     ]
-    ok, detail = _run_command(command)
+    if endpoints:
+        command.extend(["--server-hosts", endpoints])
+    command.extend(
+        [
+            "--client-name",
+            _default_client_name(),
+            "--autostart",
+        ]
+    )
+    ok, detail = _run_deskflow_setup(command)
     if ok:
-        return True, f"saved endpoints: {server_hosts}"
+        if endpoints:
+            return True, f"saved endpoints: {endpoints}"
+        return True, "configured Deskflow client for LAN discovery"
     return False, f"failed to save endpoints: {detail}"
 
 
@@ -267,16 +333,14 @@ def _saved_deskflow_peer_name() -> str:
 
 
 def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
-    script = _project_dir() / "scripts" / "configure_deskflow.sh"
     if sys.platform == "darwin":
         role = "server"
         client_name = peer_hostname.strip()
         if not client_name or client_name == "unknown":
             client_name = _saved_deskflow_peer_name()
         if not client_name:
-            return False, "peer name is not available yet; start UnixDrop on the Linux laptop first"
+            return False, "peer name is not available yet; start UnixDrop on the peer client machine first"
         command = [
-            str(script),
             "--role",
             role,
             "--client-name",
@@ -287,7 +351,6 @@ def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
     elif sys.platform.startswith("linux"):
         role = "client"
         command = [
-            str(script),
             "--role",
             role,
             "--client-name",
@@ -302,7 +365,7 @@ def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
     stopped, stop_detail = _stop_deskflow_processes()
     if not stopped:
         return False, stop_detail
-    ok, detail = _run_command(command)
+    ok, detail = _run_deskflow_setup(command)
     if not ok:
         return False, f"Deskflow setup failed: {detail}"
     config_ok, config_detail = _update_quick_setup_config(
@@ -376,7 +439,7 @@ def _sync_receiver_endpoint(
     else:
         host = _first_endpoint_host(server_hosts)
         if not host:
-            return False, "could not derive receiver host from entered endpoints"
+            return True, "receiver endpoint unchanged (LAN discovery only)"
 
     config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
     if not config_path.exists():
@@ -476,14 +539,9 @@ def _start_local_receiver_now() -> tuple[bool, str]:
     if _local_tcp_open("127.0.0.1", receiver_port):
         return True, f"local receiver already listening on 127.0.0.1:{receiver_port}"
 
-    env = os.environ.copy()
-    project_dir = _project_dir()
-    env["PYTHONPATH"] = f"{project_dir}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(project_dir)
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "unixdrop.linux_service"],
-            cwd=str(project_dir),
-            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -772,13 +830,7 @@ def _render(
     print(f"Message: {message}")
     print("")
 
-    drop_lines = [
-        f"folder      : {status.get('local drop folder', 'unknown')}",
-        f"local inbox : {status.get('local inbox', 'unknown')}",
-        f"pending     : {status.get('pending files in drop folder', 'unknown')}",
-        f"last upload : {status.get('last upload result', 'none')}",
-    ]
-    for line in _panel_lines("drop to peer", drop_lines):
+    for line in _drop_panel_lines(status):
         print(line)
     print("")
 
@@ -811,16 +863,16 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
             if not key:
                 continue
             if key.lower() == "e":
-                entered = _prompt_line("Server endpoints (lan:24800,tailscale:24800): ").strip()
+                entered = _prompt_line("Server endpoints (blank=LAN discovery, or lan:24800,tailnet:24800): ").strip()
                 if not entered:
-                    entered = DEFAULT_TUI_SERVER_HOSTS
-                    receiver_override = DEFAULT_TUI_RECEIVER_URL
-                    prefix = "empty input -> using defaults"
+                    receiver_override = None
+                    prefix = "using LAN discovery"
                 else:
                     receiver_override = None
                     prefix = "saved endpoints"
+                endpoint_label = entered or "LAN discovery"
                 receiver_input = _prompt_line(
-                    "Peer receiver IP/host for UnixDrop (blank=same as first server host): "
+                    "Peer receiver IP/host for UnixDrop (blank=same as first server host; discovery leaves unchanged): "
                 ).strip()
                 if receiver_input:
                     receiver_override = receiver_input
@@ -829,9 +881,9 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                 message = detail
                 if ok:
                     _, start_detail = _restart_deskflow_client_now()
-                    message = f"{prefix}: {entered} | {recv_detail} | {start_detail}"
+                    message = f"{prefix}: {endpoint_label} | {recv_detail} | {start_detail}"
                     if not recv_ok:
-                        message = f"{prefix}: {entered} | warning: {recv_detail} | {start_detail}"
+                        message = f"{prefix}: {endpoint_label} | warning: {recv_detail} | {start_detail}"
                 else:
                     message = f"{detail} | {recv_detail}"
                     if not recv_ok:

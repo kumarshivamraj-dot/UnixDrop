@@ -66,6 +66,114 @@ class ConfigTests(unittest.TestCase):
         cfg = load_config(config_path)
         self.assertTrue(str(cfg.drop_dir).endswith("LegacyDrop"))
 
+    def test_missing_folder_keys_use_portable_defaults(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "http://127.0.0.1:8765",
+            }
+        )
+
+        cfg = load_config(config_path)
+
+        self.assertTrue(str(cfg.inbox_dir).endswith("UnixDrop/Inbox"))
+        self.assertTrue(str(cfg.drop_dir).endswith("UnixDrop/Drop"))
+        self.assertTrue(str(cfg.link_log_path).endswith("UnixDrop/Inbox/link-log.jsonl"))
+
+    def test_missing_config_mentions_init_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing.json"
+
+            with self.assertRaises(FileNotFoundError) as ctx:
+                load_config(missing)
+
+            self.assertIn("deskbridge init", str(ctx.exception))
+
+    def test_rejects_empty_auth_token(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "",
+                "receiver_url": "http://127.0.0.1:8765",
+            }
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            load_config(config_path)
+
+        self.assertIn("auth_token", str(ctx.exception))
+
+    def test_rejects_invalid_receiver_url(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "not-a-url",
+            }
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            load_config(config_path)
+
+        self.assertIn("receiver_url", str(ctx.exception))
+
+    def test_rejects_invalid_numeric_limits(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "http://127.0.0.1:8765",
+                "receiver": {"port": 0},
+            }
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            load_config(config_path)
+
+        self.assertIn("port", str(ctx.exception))
+
+    def test_warns_for_placeholder_token_on_all_interfaces(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "replace-with-the-same-random-token-on-both-machines",
+                "receiver_url": "http://127.0.0.1:8765",
+                "receiver": {"listen_host": "0.0.0.0"},
+            }
+        )
+
+        stderr_buffer = io.StringIO()
+        with redirect_stderr(stderr_buffer):
+            load_config(config_path)
+
+        self.assertIn("placeholder auth_token", stderr_buffer.getvalue())
+
+    def test_link_log_defaults_to_configured_inbox(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "http://127.0.0.1:8765",
+                "inbox_dir": "~/UnixDrop/Inbox",
+            }
+        )
+
+        cfg = load_config(config_path)
+
+        self.assertTrue(str(cfg.link_log_path).endswith("UnixDrop/Inbox/link-log.jsonl"))
+
+    def test_tabs_firefox_debug_url_maps_from_nested_config(self) -> None:
+        config_path = self._write_temp_config(
+            {
+                "auth_token": "token",
+                "receiver_url": "http://127.0.0.1:8765",
+                "tabs": {
+                    "default_browser": "firefox",
+                    "firefox_debug_url": "http://127.0.0.1:9333",
+                },
+            }
+        )
+
+        cfg = load_config(config_path)
+
+        self.assertEqual(cfg.tabs_default_browser, "firefox")
+        self.assertEqual(cfg.tabs_firefox_debug_url, "http://127.0.0.1:9333")
+
     def test_deskflow_nested_keys_map_to_flat_fields(self) -> None:
         config_path = self._write_temp_config(
             {

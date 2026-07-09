@@ -5,12 +5,12 @@ import json
 import subprocess
 from urllib import request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
-from unixdrop.config import load_config
+from unixdrop.config import AppConfig, load_config
 
 
-CONFIG = load_config()
+DEFAULT_FIREFOX_DEBUG_URL = "http://127.0.0.1:9222"
 
 
 BROWSER_ALIASES = {
@@ -22,6 +22,10 @@ BROWSER_ALIASES = {
     "edge": "Microsoft Edge",
     "vivaldi": "Vivaldi",
     "opera": "Opera",
+    "firefox": "Firefox",
+    "firefox-developer": "Firefox Developer Edition",
+    "firefox-developer-edition": "Firefox Developer Edition",
+    "librewolf": "LibreWolf",
 }
 
 BROWSER_APP_NAMES = [
@@ -33,7 +37,16 @@ BROWSER_APP_NAMES = [
     "Microsoft Edge",
     "Vivaldi",
     "Opera",
+    "Firefox",
+    "Firefox Developer Edition",
+    "LibreWolf",
 ]
+
+FIREFOX_APP_NAMES = {
+    "Firefox",
+    "Firefox Developer Edition",
+    "LibreWolf",
+}
 
 
 def _run_osascript(script: str) -> str:
@@ -47,6 +60,10 @@ def _run_osascript(script: str) -> str:
     if result.returncode != 0:
         raise SystemExit(result.stderr.strip() or "could not read browser url")
     return result.stdout.strip()
+
+
+def _load_runtime_config(config: AppConfig | None = None) -> AppConfig:
+    return config or load_config()
 
 
 def _is_running(app_name: str) -> bool:
@@ -90,11 +107,90 @@ end tell
     return _run_osascript(script)
 
 
-def _resolve_browser_arg(browser: str | None) -> str | None:
-    if not browser or browser == "auto":
-        return None
+def _firefox_list_url(debug_url: str | None = None, config: AppConfig | None = None) -> str:
+    cfg = _load_runtime_config(config)
+    base = (debug_url or cfg.tabs_firefox_debug_url or DEFAULT_FIREFOX_DEBUG_URL).strip()
+    if not base:
+        base = DEFAULT_FIREFOX_DEBUG_URL
+    if base.endswith("/json/list"):
+        return base
+    return urljoin(base.rstrip("/") + "/", "json/list")
 
-    normalized = browser.strip().lower()
+
+def _fetch_firefox_targets(debug_url: str | None = None, config: AppConfig | None = None) -> list[dict]:
+    target = _firefox_list_url(debug_url, config)
+    try:
+        with request.urlopen(target, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except URLError as exc:
+        reason = str(exc.reason)
+        raise SystemExit(
+            f"could not reach Firefox debug endpoint at {target}: {reason}. "
+            "Start Firefox with remote debugging enabled or pass --firefox-debug-url."
+        ) from exc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"could not read Firefox debug endpoint at {target}: {exc}") from exc
+
+    if not isinstance(payload, list):
+        raise SystemExit(f"Firefox debug endpoint returned unexpected payload at {target}")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _target_url(target: dict) -> str:
+    value = target.get("url", "")
+    return value if isinstance(value, str) else ""
+
+
+def _is_page_target(target: dict) -> bool:
+    target_type = str(target.get("type", "page")).lower()
+    return target_type in {"page", "tab"}
+
+
+def _is_active_target(target: dict) -> bool:
+    for key in ("active", "focused", "selected", "current", "foreground"):
+        if target.get(key) is True:
+            return True
+    info = target.get("targetInfo")
+    if isinstance(info, dict):
+        for key in ("active", "focused", "selected", "current", "foreground"):
+            if info.get(key) is True:
+                return True
+    return False
+
+
+def firefox_url_from_targets(targets: list[dict]) -> str:
+    candidates = [
+        target
+        for target in targets
+        if _is_page_target(target) and is_supported_web_url(_target_url(target))
+    ]
+    if not candidates:
+        return ""
+    active = [target for target in candidates if _is_active_target(target)]
+    if len(active) == 1:
+        return _target_url(active[0])
+    if len(candidates) == 1:
+        return _target_url(candidates[0])
+    raise SystemExit(
+        "Firefox debug endpoint has multiple web tabs but no single active tab marker; "
+        "send explicitly with `deskbridge url <url>` or close extra debug tabs."
+    )
+
+
+def _read_firefox_url(debug_url: str | None = None, config: AppConfig | None = None) -> str:
+    return firefox_url_from_targets(_fetch_firefox_targets(debug_url, config))
+
+
+def _resolve_browser_arg(browser: str | None, config: AppConfig | None = None) -> str | None:
+    requested = (browser or "auto").strip()
+    if requested.lower() == "auto":
+        cfg = _load_runtime_config(config)
+        configured = str(getattr(cfg, "tabs_default_browser", "auto") or "auto").strip()
+        if not configured or configured.lower() == "auto":
+            return None
+        requested = configured
+
+    normalized = requested.strip().lower()
     if normalized in BROWSER_ALIASES:
         return BROWSER_ALIASES[normalized]
 
@@ -106,23 +202,36 @@ def _resolve_browser_arg(browser: str | None) -> str | None:
     raise SystemExit(f"unsupported browser '{browser}'. Supported: {supported}, auto")
 
 
-def current_browser_context(browser: str | None = None) -> tuple[str, str]:
-    selected = _resolve_browser_arg(browser)
+def current_browser_context(
+    browser: str | None = None,
+    firefox_debug_url: str | None = None,
+    *,
+    config: AppConfig | None = None,
+) -> tuple[str, str]:
+    cfg = _load_runtime_config(config)
+    selected = _resolve_browser_arg(browser, cfg)
     app_names = [selected] if selected else BROWSER_APP_NAMES
 
     for app_name in app_names:
         if app_name is None:
             continue
         try:
-            if not _is_running(app_name):
-                continue
-            if app_name == "Safari":
-                url = _read_safari_url()
+            if app_name in FIREFOX_APP_NAMES:
+                if selected is None and not _is_running(app_name):
+                    continue
+                url = _read_firefox_url(firefox_debug_url, cfg)
             else:
-                url = _read_chromium_url(app_name)
+                if not _is_running(app_name):
+                    continue
+                if app_name == "Safari":
+                    url = _read_safari_url()
+                else:
+                    url = _read_chromium_url(app_name)
             if url:
                 return app_name, url
         except SystemExit:
+            if selected is not None:
+                raise
             continue
 
     return "", ""
@@ -141,47 +250,65 @@ def send_url(
     auth_token: str | None = None,
     timeout_seconds: int | None = None,
     source: str = "browser-helper",
+    config: AppConfig | None = None,
 ) -> None:
-    target = (receiver_url or CONFIG.receiver_url).rstrip("/") + "/api/link"
+    cfg = config
+    if receiver_url is None or auth_token is None or timeout_seconds is None:
+        cfg = _load_runtime_config(cfg)
+    target = (receiver_url or cfg.receiver_url).rstrip("/") + "/api/link"
     body = json.dumps({"url": url, "source": source, "no_open": no_open}).encode("utf-8")
     req = request.Request(
         target,
         data=body,
         method="POST",
         headers={
-            "Authorization": f"Bearer {auth_token or CONFIG.auth_token}",
+            "Authorization": f"Bearer {auth_token or cfg.auth_token}",
             "Content-Type": "application/json",
         },
     )
     try:
-        with request.urlopen(req, timeout=timeout_seconds or CONFIG.request_timeout_seconds):
+        with request.urlopen(req, timeout=timeout_seconds or cfg.request_timeout_seconds):
             return
     except HTTPError as exc:
+        code = exc.code
+        try:
+            exc.close()
+        except Exception:
+            pass
         raise SystemExit(
-            f"receiver rejected tab send ({exc.code}) at {target}. "
+            f"receiver rejected tab send ({code}) at {target}. "
             "Check auth token and receiver logs."
-        ) from exc
+        ) from None
     except URLError as exc:
         reason = str(exc.reason)
         raise SystemExit(
             f"could not reach peer receiver at {target}: {reason}. "
-            "Start/verify receiver with `./deskbridge status` and `./deskbridge health`."
+            "Start/verify receiver with `deskbridge status` and `deskbridge health`."
         ) from exc
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Send active macOS browser tab to peer receiver")
-    parser.add_argument("--browser", default="auto", help="auto, safari, chrome, arc, brave, chromium, edge, vivaldi, opera")
+    parser = argparse.ArgumentParser(description="Send active browser tab to peer receiver")
+    parser.add_argument(
+        "--browser",
+        default="auto",
+        help="auto, safari, chrome, arc, brave, chromium, edge, firefox, firefox-developer, librewolf, vivaldi, opera",
+    )
+    parser.add_argument(
+        "--firefox-debug-url",
+        help="Firefox-compatible debug endpoint, defaults to tabs.firefox_debug_url or http://127.0.0.1:9222",
+    )
     parser.add_argument("--no-open", action="store_true", help="queue link on peer instead of opening immediately")
     args = parser.parse_args(argv)
 
-    app_name, url = current_browser_context(args.browser)
+    cfg = load_config()
+    app_name, url = current_browser_context(args.browser, firefox_debug_url=args.firefox_debug_url, config=cfg)
     if not url:
         raise SystemExit("no active browser url found in supported running browsers")
     if not is_supported_web_url(url):
         label = app_name or "browser"
         raise SystemExit(f"{label} returned a non-web URL: {url}")
-    send_url(url, no_open=args.no_open, source="mac-browser-helper")
+    send_url(url, no_open=args.no_open, source="mac-browser-helper", config=cfg)
     print(url)
 
 

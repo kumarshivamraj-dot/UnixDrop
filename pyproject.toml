@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unixdrop"
+description = "Small macOS/Linux desk bridge for files, links, clipboard, and Deskflow setup"
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+authors = [
+  { name = "UnixDrop maintainers" }
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Desktop Environment",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+deskbridge = "unixdrop.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["unixdrop*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "unixdrop.__version__" }

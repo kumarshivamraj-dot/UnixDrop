@@ -33,10 +33,11 @@ class StateFileTests(unittest.TestCase):
     def test_status_ignores_corrupt_state_file(self) -> None:
         status = importlib.import_module("unixdrop.status")
         status = importlib.reload(status)
-        status.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        status.STATE_FILE.write_text('{"last_upload_result": "unterminated', encoding="utf-8")
+        state_file = self.root / "state" / "mac_state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text('{"last_upload_result": "unterminated', encoding="utf-8")
 
-        self.assertEqual(status._read_state(), {})
+        self.assertEqual(status._read_state(state_file), {})
 
     def test_mac_agent_recovers_from_corrupt_state_and_saves_valid_json(self) -> None:
         mac_agent = importlib.import_module("unixdrop.mac_agent")

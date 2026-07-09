@@ -81,7 +81,7 @@ def migrate(raw: dict) -> dict:
     deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
 
     host, port = _parse_receiver(raw)
-    inbox_dir = str(raw.get("inbox_dir", receiver.get("linux_inbox", "~/Inbox/MacDrop")))
+    inbox_dir = str(raw.get("inbox_dir", receiver.get("linux_inbox", "~/UnixDrop/Inbox")))
 
     migrated = {
         "auth_token": raw["auth_token"],
@@ -98,7 +98,7 @@ def migrate(raw: dict) -> dict:
             "max_chars": int(raw.get("max_clipboard_chars", clipboard.get("max_chars", 20000))),
         },
         "drop": {
-            "folder": str(raw.get("drop_dir", drop.get("folder", raw.get("sync_dir", "~/Drop to ThinkPad")))),
+            "folder": str(raw.get("drop_dir", drop.get("folder", raw.get("sync_dir", "~/UnixDrop/Drop")))),
             "delete_after_send": _as_bool(raw.get("delete_after_send", drop.get("delete_after_send", False))),
             "max_file_mb": int(raw.get("max_file_mb", drop.get("max_file_mb", 500))),
         },
@@ -127,7 +127,7 @@ def migrate(raw: dict) -> dict:
                 default="~/.config/deskflow/start-deskflow-client.sh",
             ),
         },
-        "link_log_path": str(raw.get("link_log_path", "~/Inbox/MacDrop/link-log.jsonl")),
+        "link_log_path": str(raw.get("link_log_path", "~/UnixDrop/Inbox/link-log.jsonl")),
         "state_dir": str(raw.get("state_dir", "~/.local/state/unixdrop")),
         "clipboard_poll_seconds": int(raw.get("clipboard_poll_seconds", 2)),
         "file_poll_seconds": int(raw.get("file_poll_seconds", 5)),

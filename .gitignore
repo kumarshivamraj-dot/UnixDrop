@@ -2,3 +2,15 @@ config.json
 __pycache__/
 *.py[cod]
 .nvimlog
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+*.backup-*
+link-log.jsonl
+inbox/
+outbox/

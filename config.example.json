@@ -1,0 +1,36 @@
+{
+  "auth_token": "replace-with-the-same-random-token-on-both-machines",
+  "receiver_url": "http://PEER_HOST_OR_IP:8765",
+  "receiver": {
+    "listen_host": "0.0.0.0",
+    "port": 8765,
+    "auto_open_links": true
+  },
+  "inbox_dir": "~/UnixDrop/Inbox",
+  "drop_dir": "~/UnixDrop/Drop",
+  "link_log_path": "~/UnixDrop/Inbox/link-log.jsonl",
+  "state_dir": "~/.local/state/unixdrop",
+  "drop": {
+    "delete_after_send": false,
+    "max_file_mb": 500
+  },
+  "clipboard": {
+    "mode": "off",
+    "max_chars": 20000
+  },
+  "tabs": {
+    "default_browser": "auto",
+    "firefox_debug_url": "http://127.0.0.1:9222"
+  },
+  "deskflow": {
+    "role": "off",
+    "server_start_script": "~/.config/deskflow/start-deskflow-server.sh",
+    "client_start_script": "~/.config/deskflow/start-deskflow-client.sh"
+  },
+  "obsidian": {
+    "enabled": false,
+    "local_vault": "~/Obsidian/MainVault",
+    "remote_vault": "",
+    "conflict_strategy": "copy"
+  }
+}

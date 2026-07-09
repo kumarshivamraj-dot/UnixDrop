@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import parse_qs, unquote, urlparse
 
 from unixdrop import __version__
@@ -206,6 +208,60 @@ def resolve_conflict_destination(inbox_dir: Path, original_name: str, now: datet
     return destination.with_name(f"{stem} (conflict {timestamp}){suffix}")
 
 
+def _conflict_candidate(inbox_dir: Path, safe_name: str, attempt: int, now: datetime | None = None) -> Path:
+    destination = inbox_dir / safe_name
+    if attempt == 0:
+        return destination
+    timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H-%M-%S")
+    stem = destination.stem
+    suffix = destination.suffix
+    counter = "" if attempt == 1 else f" {attempt}"
+    return destination.with_name(f"{stem} (conflict {timestamp}{counter}){suffix}")
+
+
+def _copy_request_body_to_temp(
+    source: BinaryIO,
+    temp_path: Path,
+    content_length: int,
+    *,
+    max_bytes: int,
+) -> tuple[int, str | None]:
+    if content_length <= 0:
+        return 0, "missing request body"
+    if content_length > max_bytes:
+        return 0, "request body exceeds limit"
+
+    written = 0
+    try:
+        with temp_path.open("xb") as handle:
+            remaining = content_length
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return written, "incomplete request body"
+                handle.write(chunk)
+                written += len(chunk)
+                remaining -= len(chunk)
+                if written > max_bytes:
+                    return written, "request body exceeds limit"
+    except FileExistsError:
+        return written, "temporary upload collision"
+    except OSError as exc:
+        return written, str(exc)
+    return written, None
+
+
+def _publish_temp_file_unique(temp_path: Path, inbox_dir: Path, safe_name: str) -> Path:
+    for attempt in range(100):
+        destination = _conflict_candidate(inbox_dir, safe_name, attempt)
+        try:
+            os.link(temp_path, destination)
+            return destination
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"could not reserve conflict-safe destination for {safe_name}")
+
+
 def _inbox_writable() -> bool:
     probe = CONFIG.inbox_dir / ".unixdrop-write-test"
     try:
@@ -294,7 +350,7 @@ class UnixDropHandler(BaseHTTPRequestHandler):
     def _check_auth(self) -> bool:
         token = self.headers.get("Authorization", "")
         expected = f"Bearer {CONFIG.auth_token}"
-        if token != expected:
+        if not hmac.compare_digest(token, expected):
             self._reject(HTTPStatus.UNAUTHORIZED, "invalid auth token")
             return False
         return True
@@ -487,26 +543,38 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.BAD_REQUEST, "invalid filename")
             return
 
-        max_bytes = CONFIG.max_file_mb * 1024 * 1024
-        data, error = self._read_body_bytes(max_bytes=max_bytes)
-        if error:
-            if error == "request body exceeds limit":
-                self._reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "file exceeds max_file_mb")
-            else:
-                self._reject(HTTPStatus.BAD_REQUEST, error)
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._reject(HTTPStatus.BAD_REQUEST, "invalid content length")
             return
 
-        destination = resolve_conflict_destination(CONFIG.inbox_dir, safe_name)
+        max_bytes = CONFIG.max_file_mb * 1024 * 1024
+        temp_path = CONFIG.inbox_dir / f".{safe_name}.{os.getpid()}.{time.time_ns()}.tmp"
         try:
-            destination.write_bytes(data)
+            size, error = _copy_request_body_to_temp(
+                self.rfile,
+                temp_path,
+                content_length,
+                max_bytes=max_bytes,
+            )
+            if error:
+                if error == "request body exceeds limit":
+                    self._reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "file exceeds max_file_mb")
+                else:
+                    self._reject(HTTPStatus.BAD_REQUEST, error)
+                return
+            destination = _publish_temp_file_unique(temp_path, CONFIG.inbox_dir, safe_name)
         except Exception as exc:
             self._reject(HTTPStatus.INTERNAL_SERVER_ERROR, f"failed to write file: {exc}")
             return
+        finally:
+            temp_path.unlink(missing_ok=True)
 
         event = {
             "type": "file",
             "file_name": destination.name,
-            "size_bytes": len(data),
+            "size_bytes": size,
             "received_at": _utc_now_iso(),
         }
         try:

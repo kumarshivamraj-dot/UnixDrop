@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib import parse, request
 
 from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
+from unixdrop.http_transfer import post_file
 from unixdrop.vault import build_manifest, file_sha256, should_skip_relative
 
 
@@ -165,18 +166,16 @@ def _post_json(path: str, payload: dict) -> dict:
 
 
 def _post_file(file_path: Path) -> dict:
-    req = request.Request(
-        CONFIG.receiver_url.rstrip("/") + "/api/file",
-        data=file_path.read_bytes(),
-        method="POST",
+    return post_file(
+        url=CONFIG.receiver_url.rstrip("/") + "/api/file",
+        file_path=file_path,
+        timeout_seconds=CONFIG.request_timeout_seconds,
         headers={
             "Authorization": f"Bearer {CONFIG.auth_token}",
             "Content-Type": "application/octet-stream",
             "X-Filename": file_path.name,
         },
     )
-    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def _sync_clipboard_push(state: dict) -> None:
@@ -306,10 +305,10 @@ def _fetch_bytes(path: str) -> bytes:
 
 def _post_vault_file(relative_path: str, file_path: Path) -> None:
     stat = file_path.stat()
-    req = request.Request(
-        CONFIG.receiver_url.rstrip("/") + "/api/vault/file",
-        data=file_path.read_bytes(),
-        method="POST",
+    post_file(
+        url=CONFIG.receiver_url.rstrip("/") + "/api/vault/file",
+        file_path=file_path,
+        timeout_seconds=CONFIG.request_timeout_seconds,
         headers={
             "Authorization": f"Bearer {CONFIG.auth_token}",
             "Content-Type": "application/octet-stream",
@@ -317,8 +316,6 @@ def _post_vault_file(relative_path: str, file_path: Path) -> None:
             "X-File-Mtime": str(stat.st_mtime),
         },
     )
-    with request.urlopen(req, timeout=CONFIG.request_timeout_seconds):
-        return
 
 
 def _write_conflict_copy(file_path: Path, incoming_bytes: bytes, remote_sha: str) -> None:

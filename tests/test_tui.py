@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 import json
@@ -10,6 +11,8 @@ from unittest.mock import patch
 
 from unixdrop.config import ENV_CONFIG_PATH
 from unixdrop.tui import (
+    _apply_client_server_hosts,
+    _drop_panel_lines,
     _first_endpoint_host,
     _open_drop_folder_now,
     _parse_health,
@@ -67,15 +70,15 @@ class TuiTests(unittest.TestCase):
     @patch("unixdrop.tui._disable_standalone_deskflow_autostarts", return_value=(True, "disabled"))
     @patch("unixdrop.tui._start_deskflow_now", return_value=(True, "started"))
     @patch("unixdrop.tui._update_quick_setup_config", return_value=(True, "saved"))
-    @patch("unixdrop.tui._run_command", return_value=(True, "ok"))
+    @patch("unixdrop.tui._run_deskflow_setup", return_value=(True, "ok"))
     @patch("unixdrop.tui.sys.platform", "darwin")
     def test_quick_setup_mac_uses_peer_hostname(
-        self, run_mock, _config_mock, _start_mock, _disable_mock, _stop_mock
+        self, setup_mock, _config_mock, _start_mock, _disable_mock, _stop_mock
     ) -> None:
         ok, detail = _quick_setup_deskflow("thinkpad.local")
 
         self.assertTrue(ok, detail)
-        command = run_mock.call_args.args[0]
+        command = setup_mock.call_args.args[0]
         self.assertIn("server", command)
         self.assertIn("thinkpad.local", command)
         self.assertIn("right", command)
@@ -85,17 +88,18 @@ class TuiTests(unittest.TestCase):
     @patch("unixdrop.tui._start_deskflow_now", return_value=(True, "started"))
     @patch("unixdrop.tui._update_quick_setup_config", return_value=(True, "saved"))
     @patch("unixdrop.tui._default_client_name", return_value="thinkpad")
-    @patch("unixdrop.tui._run_command", return_value=(True, "ok"))
+    @patch("unixdrop.tui._run_deskflow_setup", return_value=(True, "ok"))
     @patch("unixdrop.tui.sys.platform", "linux")
     def test_quick_setup_linux_uses_discovery(
-        self, run_mock, _name_mock, _config_mock, _start_mock, _disable_mock, _stop_mock
+        self, setup_mock, _name_mock, _config_mock, _start_mock, _disable_mock, _stop_mock
     ) -> None:
         ok, detail = _quick_setup_deskflow()
 
         self.assertTrue(ok, detail)
-        command = run_mock.call_args.args[0]
+        command = setup_mock.call_args.args[0]
         self.assertIn("client", command)
         self.assertNotIn("--server-ip", command)
+        self.assertNotIn("--server-hosts", command)
 
     def test_parse_health_rows(self) -> None:
         rows = _parse_health(
@@ -134,6 +138,39 @@ class TuiTests(unittest.TestCase):
         self.assertIn("latency 14 ms", summary)
         self.assertIn("jitter", summary)
         self.assertIn("peer kashira", summary)
+
+    def test_drop_panel_uses_clear_labels_and_queue_state(self) -> None:
+        lines = _drop_panel_lines(
+            {
+                "local drop folder": "/home/snape/UnixDrop/outbox",
+                "local inbox": "/home/snape/UnixDrop/inbox",
+                "pending files in drop folder": "0",
+                "last upload result": "none",
+            },
+            width=64,
+        )
+
+        self.assertIn("drop to peer", lines[0])
+        self.assertTrue(any("drop folder" in line for line in lines))
+        self.assertTrue(any("local inbox" in line for line in lines))
+        self.assertTrue(any("idle - no files waiting" in line for line in lines))
+        self.assertTrue(all(len(line) == 64 for line in lines))
+
+    def test_drop_panel_truncates_long_paths(self) -> None:
+        lines = _drop_panel_lines(
+            {
+                "local drop folder": "/home/snape/very/long/path/that/keeps/going/outbox",
+                "local inbox": "/home/snape/UnixDrop/inbox",
+                "pending files in drop folder": "12",
+                "last upload result": "uploaded huge-report.pdf",
+            },
+            width=56,
+        )
+
+        rendered = "\n".join(lines)
+        self.assertIn("...", rendered)
+        self.assertIn("12 files waiting", rendered)
+        self.assertTrue(all(len(line) == 56 for line in lines))
 
     @patch("unixdrop.tui.subprocess.Popen")
     @patch("unixdrop.tui.subprocess.run")
@@ -269,9 +306,9 @@ class TuiTests(unittest.TestCase):
                 json.dumps(
                     {
                         "auth_token": "token",
-                        "receiver_url": "http://100.118.15.70:8765",
+                        "receiver_url": "http://203.0.113.70:8765",
                         "receiver": {
-                            "host": "100.118.15.70",
+                            "host": "203.0.113.70",
                             "port": 8765,
                         },
                     }
@@ -303,13 +340,44 @@ class TuiTests(unittest.TestCase):
             with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
                 ok, detail = _sync_receiver_endpoint(
                     "192.168.1.5:24800",
-                    "http://100.118.15.70:8765",
+                    "http://198.51.100.70:8765",
                 )
             self.assertTrue(ok)
-            self.assertIn("http://100.118.15.70:8765", detail)
+            self.assertIn("http://198.51.100.70:8765", detail)
             payload = json.loads(config_path.read_text())
-            self.assertEqual(payload["receiver"]["host"], "100.118.15.70")
-            self.assertEqual(payload["receiver_url"], "http://100.118.15.70:8765")
+            self.assertEqual(payload["receiver"]["host"], "198.51.100.70")
+            self.assertEqual(payload["receiver_url"], "http://198.51.100.70:8765")
+
+    def test_sync_receiver_endpoint_blank_leaves_config_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            original = {
+                "auth_token": "token",
+                "receiver_url": "http://203.0.113.20:8765",
+                "receiver": {
+                    "host": "203.0.113.20",
+                    "port": 8765,
+                },
+            }
+            config_path.write_text(json.dumps(original))
+            with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
+                ok, detail = _sync_receiver_endpoint("", None)
+            self.assertTrue(ok)
+            self.assertIn("unchanged", detail)
+            self.assertEqual(json.loads(config_path.read_text()), original)
+
+    @patch("unixdrop.tui._default_client_name", return_value="peer-laptop")
+    @patch("unixdrop.tui._run_deskflow_setup", return_value=(True, "ok"))
+    def test_apply_client_server_hosts_blank_uses_discovery(self, setup_mock, _name_mock) -> None:
+        ok, detail = _apply_client_server_hosts("")
+
+        self.assertTrue(ok, detail)
+        command = setup_mock.call_args.args[0]
+        self.assertIn("--role", command)
+        self.assertIn("client", command)
+        self.assertIn("--autostart", command)
+        self.assertNotIn("--server-hosts", command)
+        self.assertIn("LAN discovery", detail)
 
     @patch("unixdrop.tui._local_tcp_open", return_value=True)
     @patch("unixdrop.tui.load_config")
@@ -318,6 +386,24 @@ class TuiTests(unittest.TestCase):
         ok, detail = _start_local_receiver_now()
         self.assertTrue(ok)
         self.assertIn("already listening", detail)
+
+    @patch("unixdrop.tui.subprocess.Popen")
+    @patch("unixdrop.tui._local_tcp_open", return_value=False)
+    @patch("unixdrop.tui.load_config")
+    def test_start_local_receiver_uses_installed_module_path(
+        self, load_config_mock, _local_open_mock, popen_mock
+    ) -> None:
+        load_config_mock.return_value = SimpleNamespace(port=8765)
+        popen_mock.return_value = SimpleNamespace(pid=1234)
+
+        ok, detail = _start_local_receiver_now()
+
+        self.assertTrue(ok, detail)
+        self.assertIn("pid=1234", detail)
+        popen_mock.assert_called_once()
+        self.assertEqual(popen_mock.call_args.args[0], [sys.executable, "-m", "unixdrop.linux_service"])
+        self.assertNotIn("cwd", popen_mock.call_args.kwargs)
+        self.assertNotIn("env", popen_mock.call_args.kwargs)
 
     @patch("unixdrop.tui._local_tcp_open", return_value=True)
     @patch("unixdrop.tui.load_config")
@@ -332,7 +418,7 @@ class TuiTests(unittest.TestCase):
     @patch("unixdrop.tui.load_config")
     def test_open_drop_folder_uses_configured_folder(self, load_config_mock, popen_mock) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            drop_dir = Path(tmp) / "Drop to ThinkPad"
+            drop_dir = Path(tmp) / "Drop to Peer"
             load_config_mock.return_value = SimpleNamespace(drop_dir=drop_dir)
             popen_mock.return_value = SimpleNamespace(pid=1234)
 

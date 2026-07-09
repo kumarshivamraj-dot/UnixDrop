@@ -59,6 +59,22 @@ class LinuxServiceTests(unittest.TestCase):
         result = self.module.resolve_conflict_destination(inbox, "../danger.txt")
         self.assertEqual(result, inbox / "danger.txt")
 
+    def test_publish_temp_file_uses_conflict_name_without_overwrite(self) -> None:
+        inbox = Path(self._tempdir.name) / "atomic-inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        existing = inbox / "report.txt"
+        existing.write_text("existing", encoding="utf-8")
+        temp_path = inbox / ".upload.tmp"
+        temp_path.write_text("incoming", encoding="utf-8")
+
+        with mock.patch.object(self.module, "datetime") as datetime_mock:
+            datetime_mock.now.return_value = datetime(2026, 5, 25, 23, 10, 0)
+            published = self.module._publish_temp_file_unique(temp_path, inbox, "report.txt")
+
+        self.assertEqual(existing.read_text(encoding="utf-8"), "existing")
+        self.assertEqual(published.name, "report (conflict 2026-05-25 23-10-00).txt")
+        self.assertEqual(published.read_text(encoding="utf-8"), "incoming")
+
     def test_open_link_reports_missing_xdg_open(self) -> None:
         with mock.patch.object(self.module.shutil, "which", return_value=None):
             opened, error = self.module._open_link("https://example.com")

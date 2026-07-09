@@ -7,6 +7,7 @@ import json
 import os
 import plistlib
 import shutil
+import secrets
 import subprocess
 import sys
 import time
@@ -19,11 +20,8 @@ from pathlib import Path
 from urllib import error, request
 from urllib.parse import unquote, urlparse
 
-from unixdrop.config import load_config
-from unixdrop.health import health_lines
-from unixdrop.send_browser_url import current_browser_context, is_supported_web_url, send_url
-from unixdrop.status import status_lines
-from unixdrop.tui import run_tui
+from unixdrop.config import DEFAULT_CONFIG_PATH, load_config
+from unixdrop.http_transfer import post_file
 
 
 def _run_command(command: list[str]) -> tuple[int, str]:
@@ -193,7 +191,9 @@ def _cmd_clean(_: argparse.Namespace) -> int:
 
 
 def _cmd_tab(args: argparse.Namespace) -> int:
-    app_name, url = current_browser_context(args.browser)
+    from unixdrop.send_browser_url import current_browser_context, is_supported_web_url, send_url
+
+    app_name, url = current_browser_context(args.browser, firefox_debug_url=getattr(args, "firefox_debug_url", None))
     if not url:
         raise SystemExit("no active browser url found in supported running browsers")
     if not is_supported_web_url(url):
@@ -205,6 +205,8 @@ def _cmd_tab(args: argparse.Namespace) -> int:
 
 
 def _cmd_url(args: argparse.Namespace) -> int:
+    from unixdrop.send_browser_url import is_supported_web_url, send_url
+
     cfg = load_config()
     url = str(args.url).strip()
     if not is_supported_web_url(url):
@@ -221,19 +223,227 @@ def _cmd_url(args: argparse.Namespace) -> int:
     return 0
 
 
+def _default_config_payload() -> dict:
+    inbox_dir = "~/UnixDrop/Inbox"
+    drop_dir = "~/UnixDrop/Drop"
+    return {
+        "auth_token": secrets.token_urlsafe(32),
+        "receiver_url": "http://127.0.0.1:8765",
+        "receiver": {
+            "listen_host": "0.0.0.0",
+            "port": 8765,
+            "auto_open_links": True,
+        },
+        "inbox_dir": inbox_dir,
+        "drop_dir": drop_dir,
+        "link_log_path": f"{inbox_dir}/link-log.jsonl",
+        "state_dir": "~/.local/state/unixdrop",
+        "drop": {
+            "delete_after_send": False,
+            "max_file_mb": 500,
+        },
+        "clipboard": {
+            "mode": "off",
+            "max_chars": 20000,
+        },
+        "tabs": {
+            "default_browser": "auto",
+            "firefox_debug_url": "http://127.0.0.1:9222",
+        },
+        "deskflow": {
+            "role": "off",
+            "server_start_script": "~/.config/deskflow/start-deskflow-server.sh",
+            "client_start_script": "~/.config/deskflow/start-deskflow-client.sh",
+        },
+        "obsidian": {
+            "enabled": False,
+            "local_vault": "~/Obsidian/MainVault",
+            "remote_vault": "",
+            "conflict_strategy": "copy",
+        },
+    }
+
+
+def _write_initial_config(path: Path, *, force: bool = False) -> bool:
+    path = path.expanduser()
+    if path.exists() and not force:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_default_config_payload(), indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    path = Path(args.config).expanduser() if args.config else DEFAULT_CONFIG_PATH
+    created = _write_initial_config(path, force=args.force)
+    if created:
+        print(f"Created UnixDrop config: {path}")
+        print("Edit receiver_url on each machine so it points at the peer receiver.")
+        return 0
+    print(f"Config already exists: {path}")
+    print("Use --force to overwrite it.")
+    return 1
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _normalized_receiver_url(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("empty peer receiver URL")
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"invalid peer receiver URL: {value}")
+    try:
+        port = parsed.port or 8765
+    except ValueError as exc:
+        raise ValueError(f"invalid peer receiver URL: {exc}") from None
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{parsed.scheme}://{host}:{port}"
+
+
+def _discover_receiver_url(timeout_seconds: float) -> tuple[str | None, str]:
+    try:
+        from unixdrop.discovery import discover
+
+        result = discover(timeout_seconds)
+    except Exception as exc:
+        return None, f"discovery failed: {exc}"
+    if result is None:
+        return None, "no peer discovered on LAN"
+    host, payload = result
+    name = str(payload.get("name", "peer") or "peer")
+    return f"http://{host}:8765", f"discovered {name} at {host}; inferred UnixDrop receiver port 8765"
+
+
+def _probe_receiver(receiver_url: str, timeout_seconds: int = 2) -> tuple[bool, str]:
+    try:
+        req = request.Request(receiver_url.rstrip("/") + "/health")
+        with request.urlopen(req, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        return False, str(exc)
+    if payload.get("ok"):
+        host = payload.get("hostname", "peer")
+        version = payload.get("version", "unknown")
+        return True, f"reachable ({host}, version {version})"
+    return False, "health endpoint returned unexpected payload"
+
+
+def _cmd_setup(args: argparse.Namespace) -> int:
+    path = Path(args.config).expanduser() if args.config else DEFAULT_CONFIG_PATH
+    created = False
+    if path.exists() and not args.force:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SystemExit(f"could not read existing config {path}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise SystemExit(f"existing config is not a JSON object: {path}")
+    else:
+        payload = _default_config_payload()
+        created = True
+
+    if args.auth_token:
+        payload["auth_token"] = args.auth_token
+
+    receiver_url = args.peer_url
+    discovery_detail = "discovery skipped"
+    if not receiver_url and args.discover:
+        receiver_url, discovery_detail = _discover_receiver_url(args.discovery_timeout)
+    if receiver_url:
+        normalized = _normalized_receiver_url(receiver_url)
+        payload["receiver_url"] = normalized
+
+    if args.clipboard:
+        clipboard = payload.get("clipboard") if isinstance(payload.get("clipboard"), dict) else {}
+        clipboard["mode"] = args.clipboard
+        payload["clipboard"] = clipboard
+
+    if args.role:
+        deskflow = payload.get("deskflow") if isinstance(payload.get("deskflow"), dict) else {}
+        deskflow["enabled"] = args.role != "off"
+        deskflow["role"] = args.role
+        payload["deskflow"] = deskflow
+
+    _write_json_atomic(path, payload)
+    cfg = load_config(path)
+    reachable, reachability = _probe_receiver(cfg.receiver_url)
+
+    print("Deskbridge setup")
+    print(f"Config: {'created' if created else 'updated'} {path}")
+    print(f"Peer receiver: {cfg.receiver_url}")
+    if not args.peer_url:
+        print(f"Discovery: {discovery_detail}")
+    print(f"Peer health: {'ok' if reachable else 'warn'} - {reachability}")
+    print("")
+    print("Next commands:")
+    print("  deskbridge up")
+    if cfg.deskflow_role == "server":
+        client_name = args.client_name or "peer-laptop"
+        direction = args.direction or "right"
+        autostart = " --autostart" if args.autostart else ""
+        print(f"  deskbridge deskflow --role server --client-name {client_name} --direction {direction}{autostart}")
+        print(f"  On the peer: deskbridge deskflow --role client --client-name {client_name}{autostart}")
+    elif cfg.deskflow_role == "client":
+        autostart = " --autostart" if args.autostart else ""
+        client_name = f" --client-name {args.client_name}" if args.client_name else ""
+        print(f"  deskbridge deskflow --role client{client_name}{autostart}")
+        print("  On the keyboard/mouse machine: deskbridge deskflow --role server --client-name <this-machine-name>")
+    print("  deskbridge doctor")
+    print("  deskbridge health")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
-    for line in status_lines():
-        print(line)
+    from unixdrop.status import status_lines, status_report
+
+    if getattr(_, "json", False):
+        print(json.dumps(status_report(), indent=2, sort_keys=True))
+    else:
+        for line in status_lines():
+            print(line)
     return 0
 
 
-def _cmd_health(_: argparse.Namespace) -> int:
-    for line in health_lines():
-        print(line)
+def _cmd_health(args: argparse.Namespace) -> int:
+    from unixdrop.health import health_lines, health_report
+
+    if args.json:
+        print(json.dumps(health_report(), indent=2, sort_keys=True))
+    else:
+        for line in health_lines():
+            print(line)
     return 0
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    from unixdrop.doctor import doctor_checks, doctor_exit_code, doctor_report
+
+    config_path = Path(args.config).expanduser() if args.config else None
+    if args.json:
+        report = doctor_report(config_path)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["ok"] else 1
+    checks = doctor_checks(config_path)
+    print("Deskbridge doctor")
+    for check in checks:
+        print(check.line())
+    return doctor_exit_code(checks)
 
 
 def _cmd_tui(args: argparse.Namespace) -> int:
+    from unixdrop.tui import run_tui
+
     return run_tui(interval_seconds=args.interval, once=args.once)
 
 
@@ -308,18 +518,16 @@ def _send_file_to_receiver(file_path: Path, receiver_url: str, auth_token: str, 
     if not file_path.is_file():
         raise ValueError(f"send source must be a file: {file_path}")
 
-    req = request.Request(
-        receiver_url.rstrip("/") + "/api/file",
-        data=file_path.read_bytes(),
-        method="POST",
+    return post_file(
+        url=receiver_url.rstrip("/") + "/api/file",
+        file_path=file_path,
+        timeout_seconds=timeout_seconds,
         headers={
             "Authorization": f"Bearer {auth_token}",
             "Content-Type": "application/octet-stream",
             "X-Filename": file_path.name,
         },
     )
-    with request.urlopen(req, timeout=timeout_seconds) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def _file_sha256(file_path: Path) -> str:
@@ -724,16 +932,19 @@ def _cmd_dropzone(args: argparse.Namespace) -> int:
 
 
 def _cmd_up(_: argparse.Namespace) -> int:
-    project_dir = Path(__file__).resolve().parents[1]
+    from unixdrop.health import health_lines
+    from unixdrop.service_install import install_linux_service, install_mac_agent
+
     if sys.platform == "darwin":
-        install_script = project_dir / "scripts" / "install_mac_agent.sh"
-        target = Path("~/Library/LaunchAgents/com.unixdrop.agent.plist").expanduser()
-        subprocess.run([str(install_script)], check=True)
+        target = install_mac_agent()
+        print(f"UnixDrop service file: {target}")
+        print(f"Python executable: {sys.executable}")
         subprocess.run(["launchctl", "unload", str(target)], check=False)
         subprocess.run(["launchctl", "load", str(target)], check=True)
     elif sys.platform.startswith("linux"):
-        install_script = project_dir / "scripts" / "install_linux_service.sh"
-        subprocess.run([str(install_script)], check=True)
+        target = install_linux_service()
+        print(f"UnixDrop service file: {target}")
+        print(f"Python executable: {sys.executable}")
         subprocess.run(
             ["systemctl", "--user", "enable", "--now", "unixdrop-receiver.service"],
             check=True,
@@ -747,14 +958,8 @@ def _cmd_up(_: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_deskflow(args: argparse.Namespace) -> int:
-    project_dir = Path(__file__).resolve().parents[1]
-    script = project_dir / "scripts" / "configure_deskflow.sh"
-    if not script.exists():
-        raise SystemExit(f"missing script: {script}")
-
+def _deskflow_command_args(args: argparse.Namespace) -> list[str]:
     command = [
-        str(script),
         "--role",
         args.role,
     ]
@@ -774,8 +979,14 @@ def _cmd_deskflow(args: argparse.Namespace) -> int:
         command.append("--autostart")
     if args.verify:
         command.append("--verify")
+    return command
 
-    subprocess.run(command, check=True)
+
+def _cmd_deskflow(args: argparse.Namespace) -> int:
+    command_args = _deskflow_command_args(args)
+    from unixdrop.deskflow_setup import main as deskflow_main
+
+    deskflow_main(command_args)
     return 0
 
 
@@ -783,11 +994,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deskbridge", description="Desk bridge between macOS and Linux")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    init_parser = subparsers.add_parser("init", help="Create a starter UnixDrop config")
+    init_parser.add_argument("--config", help="Config path, defaults to ~/.config/unixdrop/config.json")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config file")
+    init_parser.set_defaults(func=_cmd_init)
+
+    setup_parser = subparsers.add_parser("setup", help="Create/update config and print first-run next steps")
+    setup_parser.add_argument("--config", help="Config path, defaults to ~/.config/unixdrop/config.json")
+    setup_parser.add_argument("--force", action="store_true", help="Overwrite config with fresh defaults before applying options")
+    setup_parser.add_argument("--peer-url", help="Peer receiver URL or host, e.g. http://192.168.1.50:8765")
+    setup_parser.add_argument("--auth-token", help="Shared auth token to write into config")
+    setup_parser.add_argument(
+        "--discover",
+        dest="discover",
+        action="store_true",
+        default=True,
+        help="Try LAN discovery when --peer-url is not provided",
+    )
+    setup_parser.add_argument("--no-discover", dest="discover", action="store_false", help="Skip LAN discovery")
+    setup_parser.add_argument("--discovery-timeout", type=float, default=2.0, help="LAN discovery timeout in seconds")
+    setup_parser.add_argument("--role", choices=["off", "server", "client"], help="Optional Deskflow role to save")
+    setup_parser.add_argument(
+        "--clipboard",
+        choices=["off", "mac_to_linux", "linux_to_mac", "two_way"],
+        help="Optional clipboard mode to save",
+    )
+    setup_parser.add_argument("--client-name", help="Deskflow client screen name for printed commands")
+    setup_parser.add_argument("--direction", choices=["right", "left", "up", "down"], default="right")
+    setup_parser.add_argument("--autostart", action="store_true", help="Include --autostart in printed Deskflow commands")
+    setup_parser.set_defaults(func=_cmd_setup)
+
     tab_parser = subparsers.add_parser("tab", help="Send active macOS browser tab to peer")
     tab_parser.add_argument(
         "--browser",
         default="auto",
-        help="auto, safari, chrome, arc, brave, chromium, edge, vivaldi, opera",
+        help="auto, safari, chrome, arc, brave, chromium, edge, firefox, firefox-developer, librewolf, vivaldi, opera",
+    )
+    tab_parser.add_argument(
+        "--firefox-debug-url",
+        help="Firefox-compatible debug endpoint, defaults to tabs.firefox_debug_url or http://127.0.0.1:9222",
     )
     tab_parser.add_argument("--no-open", action="store_true", help="Queue link on peer instead of opening")
     tab_parser.set_defaults(func=_cmd_tab)
@@ -799,10 +1044,17 @@ def build_parser() -> argparse.ArgumentParser:
     url_parser.set_defaults(func=_cmd_url)
 
     status_parser = subparsers.add_parser("status", help="Show desk bridge status")
+    status_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     status_parser.set_defaults(func=_cmd_status)
 
     health_parser = subparsers.add_parser("health", help="Run health checks")
+    health_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     health_parser.set_defaults(func=_cmd_health)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check local portability prerequisites")
+    doctor_parser.add_argument("--config", help="Config path, defaults to ~/.config/unixdrop/config.json")
+    doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    doctor_parser.set_defaults(func=_cmd_doctor)
 
     tui_parser = subparsers.add_parser("tui", help="Live terminal dashboard")
     tui_parser.add_argument("--interval", type=float, default=3.0, help="Refresh interval in seconds")
@@ -867,18 +1119,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Configure Deskflow keyboard/mouse sharing.\n\n"
             "Copy-paste setup:\n"
             "  1. On the machine with the keyboard/mouse, run server setup:\n"
-            "     ./deskbridge deskflow --role server --client-name thinkpad --direction right --autostart\n\n"
+            "     ./deskbridge deskflow --role server --client-name peer-laptop --direction right --autostart\n\n"
             "  2. On the other machine, run client setup:\n"
-            "     ./deskbridge deskflow --role client --client-name thinkpad --autostart\n\n"
+            "     ./deskbridge deskflow --role client --client-name peer-laptop --autostart\n\n"
             "  3. If you have LAN and Tailscale endpoints, use fallback hosts on the client:\n"
-            "     ./deskbridge deskflow --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --client-name thinkpad --autostart\n\n"
+            "     ./deskbridge deskflow --role client --server-hosts <lan-ip>:24800,<tailscale-ip>:24800 --client-name peer-laptop --autostart\n\n"
             "  4. Verify later:\n"
             "     ./deskbridge deskflow --role server --verify\n"
             "     ./deskbridge deskflow --role client --verify\n\n"
             "Common values:\n"
             "  --direction right   Client screen is to the right of the server screen.\n"
             "  --direction left    Client screen is to the left of the server screen.\n"
-            "  --client-name       Name of the client screen, for example thinkpad.\n"
+            "  --client-name       Name of the client screen, for example peer-laptop.\n"
             "  --server-ip         Optional fixed fallback when LAN discovery is unavailable.\n"
         ),
     )
@@ -898,7 +1150,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deskflow_parser.add_argument(
         "--client-name",
-        help="Client screen name used by Deskflow, e.g. thinkpad. Use the same name on server and client setup.",
+        help="Client screen name used by Deskflow, e.g. peer-laptop. Use the same name on server and client setup.",
     )
     deskflow_parser.add_argument("--server-name", help="Server screen name for Deskflow config.")
     deskflow_parser.add_argument(
