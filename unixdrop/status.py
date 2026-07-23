@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -10,13 +11,18 @@ from pathlib import Path
 from urllib import request
 from urllib.error import URLError
 
-from unixdrop.config import AppConfig, load_config
+from unixdrop.config import AppConfig, DEFAULT_CONFIG_PATH, ENV_CONFIG_PATH, load_config
 from unixdrop.vault import build_manifest
 
 
 def _state_file(config: AppConfig | None = None) -> Path:
     cfg = config or load_config()
     return cfg.state_dir / "mac_state.json"
+
+
+def _config_display_path(config_path: Path | None = None) -> Path:
+    env_path = os.environ.get(ENV_CONFIG_PATH)
+    return (config_path or (Path(env_path) if env_path else DEFAULT_CONFIG_PATH)).expanduser()
 
 
 def _utc_now() -> datetime:
@@ -163,6 +169,8 @@ def status_lines(config: AppConfig | None = None, config_path: Path | None = Non
     service_ok, service_detail = _check_local_node_service()
 
     lines = ["Deskbridge status"]
+    lines.append(f"config file: {_config_display_path(config_path)}")
+    lines.append(f"peer receiver URL: {cfg.receiver_url}")
     lines.append(f"Local node service running: {'yes' if service_ok else 'no'} ({service_detail})")
     lines.append(f"Peer receiver reachable: {'yes' if receiver_ok else 'no'} ({detail})")
     lines.append(f"Peer receiver latency: {_format_latency(latency_ms)}")
@@ -190,7 +198,11 @@ def status_report(config: AppConfig | None = None, config_path: Path | None = No
             continue
         key, value = line.split(":", 1)
         details[key.strip()] = value.strip()
-    return {"ok": "Config load" not in details, "lines": lines, "details": details}
+    required_ok = ("Local node service running", "Peer receiver reachable")
+    ok = "Config load" not in details and all(
+        details.get(key, "").lower().startswith("yes") for key in required_ok
+    )
+    return {"ok": ok, "lines": lines, "details": details}
 
 
 def main() -> None:

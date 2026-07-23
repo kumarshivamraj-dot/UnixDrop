@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 class StateFileTests(unittest.TestCase):
@@ -51,6 +53,57 @@ class StateFileTests(unittest.TestCase):
         state["last_upload_result"] = "ok"
         mac_agent._save_state(state)
         self.assertEqual(json.loads(mac_agent.STATE_FILE.read_text(encoding="utf-8"))["last_upload_result"], "ok")
+
+    def test_mac_agent_stops_retrying_after_clean_deskflow_launcher_exit(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        process = mock.Mock()
+        process.poll.return_value = 0
+        mac_agent._DESKFLOW_RETRY_AFTER = 0.0
+        mac_agent._DESKFLOW_SUPERVISION_DISABLED = False
+
+        with (
+            mock.patch.object(mac_agent, "deskflow_start_script", return_value=Path("/tmp/start-deskflow-client.sh")),
+            mock.patch.object(mac_agent, "_start_deskflow_process") as start_mock,
+            mock.patch("builtins.print"),
+        ):
+            self.assertIsNone(mac_agent._ensure_deskflow_running(process))
+            self.assertIsNone(mac_agent._ensure_deskflow_running(None))
+
+        self.assertTrue(mac_agent._DESKFLOW_SUPERVISION_DISABLED)
+        start_mock.assert_not_called()
+
+    def test_mac_agent_does_not_push_health_probe_clipboard_text(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        mac_agent.CONFIG.clipboard_mode = "two_way"
+        state = {}
+
+        with (
+            mock.patch.object(mac_agent, "_clipboard_text", return_value="deskbridge-health-stale"),
+            mock.patch.object(mac_agent, "_post_json") as post_mock,
+        ):
+            mac_agent._sync_clipboard_push(state)
+
+        self.assertEqual(state["last_local_clipboard_hash"], hashlib.sha256(b"deskbridge-health-stale").hexdigest())
+        post_mock.assert_not_called()
+
+    def test_mac_agent_does_not_pull_health_probe_clipboard_text(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        mac_agent.CONFIG.clipboard_mode = "two_way"
+        text = "deskbridge-health-stale"
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        state = {}
+
+        with (
+            mock.patch.object(mac_agent, "_fetch_json", return_value={"text": text, "hash": digest}),
+            mock.patch.object(mac_agent, "_set_clipboard_text") as set_mock,
+        ):
+            mac_agent._pull_remote_clipboard(state)
+
+        self.assertEqual(state["last_remote_clipboard_hash"], digest)
+        set_mock.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from hashlib import sha256
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
@@ -89,6 +90,64 @@ class LinuxServiceTests(unittest.TestCase):
             opened, error = self.module._open_link("https://example.com")
         self.assertFalse(opened)
         self.assertIn("boom", str(error))
+
+    def test_health_check_clipboard_payload_is_not_stored(self) -> None:
+        with (
+            mock.patch.object(self.module, "_update_clipboard_state") as update_mock,
+            mock.patch.object(self.module, "_write_linux_clipboard") as write_mock,
+        ):
+            result = self.module._store_clipboard_payload("deskbridge-health-probe", "health-check")
+
+        self.assertEqual(result["hash"], sha256(b"deskbridge-health-probe").hexdigest())
+        self.assertFalse(result["stored"])
+        update_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_stale_health_probe_text_is_not_stored_as_user_clipboard(self) -> None:
+        with (
+            mock.patch.object(self.module, "_update_clipboard_state") as update_mock,
+            mock.patch.object(self.module, "_write_linux_clipboard") as write_mock,
+        ):
+            result = self.module._store_clipboard_payload("deskbridge-health-stale", "local")
+
+        self.assertFalse(result["stored"])
+        update_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_normal_clipboard_payload_is_stored(self) -> None:
+        with (
+            mock.patch.object(self.module, "_update_clipboard_state") as update_mock,
+            mock.patch.object(self.module, "_write_linux_clipboard") as write_mock,
+        ):
+            result = self.module._store_clipboard_payload("copied just now", "local")
+
+        self.assertTrue(result["stored"])
+        update_mock.assert_called_once_with("copied just now", "local")
+        write_mock.assert_called_once_with("copied just now")
+
+    def test_deskflow_supervisor_stops_after_clean_launcher_exit(self) -> None:
+        process = mock.Mock()
+        process.poll.return_value = 0
+        self.module.DESKFLOW_PROCESS = process
+        self.module.DESKFLOW_RETRY_AFTER = 0.0
+        self.module.DESKFLOW_SUPERVISION_DISABLED = False
+
+        try:
+            with (
+                mock.patch.object(self.module, "deskflow_start_script", return_value=Path("/tmp/start-deskflow-client.sh")),
+                mock.patch.object(self.module, "_start_deskflow_process") as start_mock,
+                mock.patch.object(self.module, "_log"),
+            ):
+                self.module._ensure_deskflow_running()
+                self.module._ensure_deskflow_running()
+
+            self.assertIsNone(self.module.DESKFLOW_PROCESS)
+            self.assertTrue(self.module.DESKFLOW_SUPERVISION_DISABLED)
+            start_mock.assert_not_called()
+        finally:
+            self.module.DESKFLOW_PROCESS = None
+            self.module.DESKFLOW_RETRY_AFTER = 0.0
+            self.module.DESKFLOW_SUPERVISION_DISABLED = False
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import uuid
 from pathlib import Path
 from urllib import request
 
+from unixdrop.clipboard_safety import HEALTH_CHECK_CLIPBOARD_PREFIX, HEALTH_CHECK_CLIPBOARD_SOURCE
 from unixdrop.config import AppConfig, clipboard_pull_enabled, clipboard_send_enabled, load_config
 
 
@@ -152,26 +154,39 @@ def health_checks(config: AppConfig | None = None, config_path: Path | None = No
     pull_enabled = clipboard_pull_enabled(cfg.clipboard_mode)
     clipboard_enabled = send_enabled or pull_enabled
     if not receiver_reachable:
-        checks.append(_result("clipboard roundtrip", False, "skipped (receiver unreachable)", skipped=True))
-    elif clipboard_enabled and send_enabled:
-        probe = f"deskbridge-health-{uuid.uuid4().hex}"
+        checks.append(_result("clipboard API", False, "skipped (receiver unreachable)", skipped=True))
+    elif send_enabled:
+        probe = f"{HEALTH_CHECK_CLIPBOARD_PREFIX}{uuid.uuid4().hex}"
+        expected_hash = hashlib.sha256(probe.encode("utf-8")).hexdigest()
         try:
-            _request_json(cfg, "/api/clipboard", method="POST", payload={"text": probe, "source": "health-check"})
-            pull_ok = True
-            if pull_enabled:
-                payload = _request_json(cfg, "/api/clipboard")
-                pull_ok = payload.get("text") == probe
-            checks.append(_result("clipboard roundtrip", pull_ok, "ok" if pull_ok else "roundtrip mismatch"))
+            payload = _request_json(
+                cfg,
+                "/api/health/clipboard-check",
+                method="POST",
+                payload={"text": probe, "source": HEALTH_CHECK_CLIPBOARD_SOURCE},
+            )
+            checks.append(
+                _result(
+                    "clipboard push API",
+                    bool(payload.get("ok"))
+                    and payload.get("stored") is False
+                    and payload.get("hash") == expected_hash,
+                    "non-mutating check ok"
+                    if payload.get("stored") is False and payload.get("hash") == expected_hash
+                    else "unexpected clipboard health response",
+                )
+            )
         except Exception as exc:
-            checks.append(_result("clipboard roundtrip", False, str(exc)))
-    elif pull_enabled:
+            checks.append(_result("clipboard push API", False, str(exc)))
+
+    if receiver_reachable and pull_enabled:
         try:
             _request_json(cfg, "/api/clipboard")
             checks.append(_result("clipboard read", True, "readable"))
         except Exception as exc:
             checks.append(_result("clipboard read", False, str(exc)))
-    else:
-        checks.append(_result("clipboard roundtrip", True, "skipped (clipboard mode off)", skipped=True))
+    elif receiver_reachable and not clipboard_enabled:
+        checks.append(_result("clipboard API", True, "skipped (clipboard mode off)", skipped=True))
 
     if receiver_reachable:
         try:

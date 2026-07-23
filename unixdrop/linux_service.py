@@ -18,6 +18,7 @@ from typing import BinaryIO
 from urllib.parse import parse_qs, unquote, urlparse
 
 from unixdrop import __version__
+from unixdrop.clipboard_safety import HEALTH_CHECK_CLIPBOARD_SOURCE, is_health_check_clipboard_text
 from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
 from unixdrop.vault import build_manifest, manifest_to_json, should_skip_relative
 
@@ -32,6 +33,9 @@ CLIPBOARD_STATE = {
 CLIPBOARD_LOCK = threading.Lock()
 DESKFLOW_PROCESS: subprocess.Popen[str] | None = None
 DESKFLOW_LOCK = threading.Lock()
+DESKFLOW_RETRY_SECONDS = 30
+DESKFLOW_RETRY_AFTER = 0.0
+DESKFLOW_SUPERVISION_DISABLED = False
 
 
 def _log(level: str, message: str) -> None:
@@ -165,6 +169,15 @@ def _clipboard_snapshot() -> dict:
         return dict(CLIPBOARD_STATE)
 
 
+def _store_clipboard_payload(text: str, source: str) -> dict:
+    digest = _hash_text(text)
+    if source == HEALTH_CHECK_CLIPBOARD_SOURCE or is_health_check_clipboard_text(text):
+        return {"ok": True, "hash": digest, "stored": False}
+    _update_clipboard_state(text, source)
+    _write_linux_clipboard(text)
+    return {"ok": True, "hash": digest, "stored": True}
+
+
 def _linux_clipboard_watcher() -> None:
     if not clipboard_pull_enabled(CONFIG.clipboard_mode):
         return
@@ -179,6 +192,10 @@ def _linux_clipboard_watcher() -> None:
                 continue
 
             digest = _hash_text(current)
+            if is_health_check_clipboard_text(current):
+                last_seen_hash = digest
+                time.sleep(CONFIG.clipboard_poll_seconds)
+                continue
             if digest == last_seen_hash:
                 time.sleep(CONFIG.clipboard_poll_seconds)
                 continue
@@ -310,18 +327,30 @@ def _start_deskflow_process() -> subprocess.Popen[str] | None:
 
 
 def _ensure_deskflow_running() -> None:
-    global DESKFLOW_PROCESS
+    global DESKFLOW_PROCESS, DESKFLOW_RETRY_AFTER, DESKFLOW_SUPERVISION_DISABLED
     if deskflow_start_script(CONFIG, sys.platform) is None:
         return
+    if DESKFLOW_SUPERVISION_DISABLED:
+        return
     with DESKFLOW_LOCK:
+        if time.monotonic() < DESKFLOW_RETRY_AFTER:
+            return
         if DESKFLOW_PROCESS is None:
             DESKFLOW_PROCESS = _start_deskflow_process()
+            if DESKFLOW_PROCESS is None:
+                DESKFLOW_RETRY_AFTER = time.monotonic() + DESKFLOW_RETRY_SECONDS
             return
         return_code = DESKFLOW_PROCESS.poll()
         if return_code is None:
             return
+        if return_code == 0:
+            DESKFLOW_PROCESS = None
+            DESKFLOW_SUPERVISION_DISABLED = True
+            _log("info", "deskflow launcher exited cleanly; assuming Deskflow is already managed externally")
+            return
         _log("warn", f"deskflow process exited with code {return_code}, restarting")
-        DESKFLOW_PROCESS = _start_deskflow_process()
+        DESKFLOW_PROCESS = None
+        DESKFLOW_RETRY_AFTER = time.monotonic() + DESKFLOW_RETRY_SECONDS
 
 
 def _deskflow_supervisor() -> None:
@@ -453,6 +482,12 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             if not self._check_auth():
                 return
             self._json_response(HTTPStatus.OK, {"ok": _inbox_writable()})
+            return
+
+        if self.path == "/api/health/clipboard-check":
+            if not self._check_auth():
+                return
+            self._handle_clipboard_health_check()
             return
 
         if not self._check_auth():
@@ -675,9 +710,26 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "clipboard text exceeds max_clipboard_chars")
             return
 
-        _update_clipboard_state(text, source)
-        _write_linux_clipboard(text)
-        self._json_response(HTTPStatus.OK, {"ok": True, "hash": _hash_text(text)})
+        self._json_response(HTTPStatus.OK, _store_clipboard_payload(text, source))
+
+    def _handle_clipboard_health_check(self) -> None:
+        if not clipboard_send_enabled(CONFIG.clipboard_mode):
+            self._reject(HTTPStatus.NOT_FOUND, "clipboard push disabled by clipboard_mode")
+            return
+
+        payload, error = self._read_json_payload(max_bytes=2 * 1024 * 1024)
+        if error:
+            self._reject(HTTPStatus.BAD_REQUEST, error)
+            return
+        text = payload.get("text", "")
+        if not isinstance(text, str):
+            self._reject(HTTPStatus.BAD_REQUEST, "invalid clipboard text")
+            return
+        if len(text) > CONFIG.max_clipboard_chars:
+            self._reject(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "clipboard text exceeds max_clipboard_chars")
+            return
+
+        self._json_response(HTTPStatus.OK, {"ok": True, "hash": _hash_text(text), "stored": False})
 
     def _handle_diagnostics(self) -> None:
         self._json_response(

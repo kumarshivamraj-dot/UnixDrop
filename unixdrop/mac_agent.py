@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib import parse, request
 
+from unixdrop.clipboard_safety import is_health_check_clipboard_text
 from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
 from unixdrop.http_transfer import post_file
 from unixdrop.vault import build_manifest, file_sha256, should_skip_relative
@@ -20,6 +21,7 @@ CONFIG = load_config()
 STATE_FILE = CONFIG.state_dir / "mac_state.json"
 DESKFLOW_RETRY_SECONDS = 30
 _DESKFLOW_RETRY_AFTER = 0.0
+_DESKFLOW_SUPERVISION_DISABLED = False
 
 
 def _default_state() -> dict:
@@ -59,16 +61,25 @@ def _start_deskflow_process() -> subprocess.Popen[str] | None:
 
 
 def _ensure_deskflow_running(process: subprocess.Popen[str] | None) -> subprocess.Popen[str] | None:
-    global _DESKFLOW_RETRY_AFTER
+    global _DESKFLOW_RETRY_AFTER, _DESKFLOW_SUPERVISION_DISABLED
     if deskflow_start_script(CONFIG, sys.platform) is None:
+        return None
+    if _DESKFLOW_SUPERVISION_DISABLED:
         return None
     if process is None:
         if time.monotonic() < _DESKFLOW_RETRY_AFTER:
             return None
-        return _start_deskflow_process()
+        proc = _start_deskflow_process()
+        if proc is None:
+            _DESKFLOW_RETRY_AFTER = time.monotonic() + DESKFLOW_RETRY_SECONDS
+        return proc
     return_code = process.poll()
     if return_code is None:
         return process
+    if return_code == 0:
+        _DESKFLOW_SUPERVISION_DISABLED = True
+        print("Deskflow launcher exited cleanly; assuming Deskflow is already managed externally")
+        return None
     _DESKFLOW_RETRY_AFTER = time.monotonic() + DESKFLOW_RETRY_SECONDS
     print(
         f"Deskflow process exited with code {return_code}; "
@@ -187,6 +198,9 @@ def _sync_clipboard_push(state: dict) -> None:
         return
 
     digest = _hash_text(current)
+    if is_health_check_clipboard_text(current):
+        state["last_local_clipboard_hash"] = digest
+        return
     if digest == state.get("last_local_clipboard_hash"):
         return
 
@@ -216,6 +230,9 @@ def _pull_remote_clipboard(state: dict) -> None:
     if remote_hash == state.get("last_remote_clipboard_hash"):
         return
     state["last_remote_clipboard_hash"] = remote_hash
+
+    if is_health_check_clipboard_text(remote_text):
+        return
 
     if remote_hash == state.get("last_local_clipboard_hash"):
         return
