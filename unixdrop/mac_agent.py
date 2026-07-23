@@ -22,6 +22,9 @@ STATE_FILE = CONFIG.state_dir / "mac_state.json"
 DESKFLOW_RETRY_SECONDS = 30
 _DESKFLOW_RETRY_AFTER = 0.0
 _DESKFLOW_SUPERVISION_DISABLED = False
+PEER_FAILURE_RETRY_SECONDS = 10
+_PEER_RETRY_AFTER = 0.0
+_PEER_LAST_ERROR = ""
 
 
 def _default_state() -> dict:
@@ -174,6 +177,28 @@ def _post_json(path: str, payload: dict) -> dict:
     )
     with request.urlopen(req, timeout=CONFIG.request_timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _peer_request_allowed() -> bool:
+    return time.monotonic() >= _PEER_RETRY_AFTER
+
+
+def _record_peer_request_success() -> None:
+    global _PEER_RETRY_AFTER, _PEER_LAST_ERROR
+    _PEER_RETRY_AFTER = 0.0
+    _PEER_LAST_ERROR = ""
+
+
+def _record_peer_request_failure(exc: Exception) -> None:
+    global _PEER_RETRY_AFTER, _PEER_LAST_ERROR
+    _PEER_RETRY_AFTER = time.monotonic() + PEER_FAILURE_RETRY_SECONDS
+    message = str(exc)
+    if message != _PEER_LAST_ERROR:
+        print(
+            "UnixDrop peer unavailable: "
+            f"{message}; retrying in {PEER_FAILURE_RETRY_SECONDS}s"
+        )
+        _PEER_LAST_ERROR = message
 
 
 def _post_file(file_path: Path) -> dict:
@@ -417,16 +442,33 @@ def main(*, start_deskflow: bool = True) -> None:
         try:
             if start_deskflow:
                 deskflow_process = _ensure_deskflow_running(deskflow_process)
-            _sync_clipboard_push(state)
-            _pull_remote_clipboard(state)
+
+            if _peer_request_allowed():
+                try:
+                    _sync_clipboard_push(state)
+                    _pull_remote_clipboard(state)
+                    _record_peer_request_success()
+                except Exception as exc:
+                    _record_peer_request_failure(exc)
 
             now = time.time()
             if now - last_file_scan >= CONFIG.file_poll_seconds:
-                _sync_drop_files(state)
+                if _peer_request_allowed():
+                    try:
+                        _sync_drop_files(state)
+                        _record_peer_request_success()
+                    except Exception as exc:
+                        state["last_upload_result"] = f"upload failed: {exc}"
+                        _record_peer_request_failure(exc)
                 last_file_scan = now
 
             if CONFIG.obsidian_enabled and now - last_vault_scan >= CONFIG.obsidian_poll_seconds:
-                _sync_obsidian_vault(state)
+                if _peer_request_allowed():
+                    try:
+                        _sync_obsidian_vault(state)
+                        _record_peer_request_success()
+                    except Exception as exc:
+                        _record_peer_request_failure(exc)
                 last_vault_scan = now
 
             _save_state(state)

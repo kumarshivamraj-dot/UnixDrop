@@ -286,12 +286,22 @@ tcp_reachable_runtime() {{
     nc -z -w 2 "${{host}}" "${{port}}" >/dev/null 2>&1
     return $?
   fi
-  return 2
+  {_quote(sys.executable)} - "$host" "$port" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+try:
+    with socket.create_connection((host, port), timeout=2):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
 }}
 
 first_reachable_endpoint_runtime() {{
   local endpoints_csv="$1"
-  local first_endpoint=""
   local raw=""
   local endpoint=""
   local host=""
@@ -301,19 +311,12 @@ first_reachable_endpoint_runtime() {{
     endpoint="${{raw#"${{raw%%[![:space:]]*}}"}}"
     endpoint="${{endpoint%"${{endpoint##*[![:space:]]}}"}}"
     [[ -n "${{endpoint}}" ]] || continue
-    if [[ -z "${{first_endpoint}}" ]]; then
-      first_endpoint="${{endpoint}}"
-    fi
     read -r host port <<<"$(split_server_endpoint_runtime "${{endpoint}}")"
     if tcp_reachable_runtime "${{host}}" "${{port}}"; then
       printf '%s\n' "${{endpoint}}"
       return 0
     fi
   done
-  if [[ -n "${{first_endpoint}}" ]]; then
-    printf '%s\n' "${{first_endpoint}}"
-    return 0
-  fi
   return 1
 }}
 
@@ -368,7 +371,8 @@ guard_single_client_instance_runtime() {{
 guard_single_client_instance_runtime
 selected_server="$(first_reachable_endpoint_runtime "${{server_candidates_csv}}" || true)"
 if [[ -z "${{selected_server}}" ]]; then
-  echo "No server address configured (empty endpoint list)" >&2
+  echo "No Deskflow server is accepting TCP connections from: ${{server_candidates_csv}}" >&2
+  echo "Start the server script on the keyboard/mouse machine and allow TCP 24800 through the firewall." >&2
   exit 1
 fi
 update_remote_host_runtime "${{selected_server}}"

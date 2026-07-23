@@ -105,6 +105,21 @@ class StateFileTests(unittest.TestCase):
         self.assertEqual(state["last_remote_clipboard_hash"], digest)
         set_mock.assert_not_called()
 
+    def test_mac_agent_peer_failure_sets_retry_backoff(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        mac_agent._PEER_RETRY_AFTER = 0.0
+        mac_agent._PEER_LAST_ERROR = ""
+
+        with mock.patch("builtins.print") as print_mock:
+            mac_agent._record_peer_request_failure(ConnectionRefusedError("connection refused"))
+
+        self.assertFalse(mac_agent._peer_request_allowed())
+        print_mock.assert_called_once()
+
+        mac_agent._record_peer_request_success()
+        self.assertTrue(mac_agent._peer_request_allowed())
+
 
 if __name__ == "__main__":
     unittest.main()
