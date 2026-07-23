@@ -12,6 +12,7 @@ from unittest.mock import patch
 from unixdrop.config import ENV_CONFIG_PATH
 from unixdrop.tui import (
     _apply_client_server_hosts,
+    _current_deskflow_role,
     _drop_panel_lines,
     _first_endpoint_host,
     _open_drop_folder_now,
@@ -19,6 +20,7 @@ from unixdrop.tui import (
     _parse_latency_ms,
     _quick_setup_deskflow,
     _restart_deskflow_client_now,
+    _start_deskflow_now,
     _start_local_receiver_now,
     _start_linux_receiver_now,
     _stop_all_now,
@@ -65,6 +67,54 @@ class TuiTests(unittest.TestCase):
             self.assertEqual(payload["clipboard"]["mode"], "two_way")
             self.assertEqual(payload["deskflow"]["role"], "client")
             self.assertTrue(payload["deskflow"]["enabled"])
+
+    @patch("unixdrop.tui.sys.platform", "darwin")
+    @patch("unixdrop.tui._current_deskflow_role", return_value=None)
+    @patch("unixdrop.tui.subprocess.Popen")
+    def test_start_deskflow_recovers_when_role_is_off(self, popen_mock, _role_mock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "start-deskflow-server.sh"
+            script.write_text("#!/usr/bin/env bash\nsleep 10\n")
+            os.chmod(script, 0o755)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth_token": "token",
+                        "receiver_url": "http://127.0.0.1:8765",
+                        "deskflow": {
+                            "enabled": False,
+                            "role": "off",
+                            "server_start_script": str(script),
+                            "client_start_script": str(root / "start-deskflow-client.sh"),
+                        },
+                    }
+                )
+            )
+            popen_mock.return_value = SimpleNamespace(pid=1234, poll=lambda: None)
+
+            with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
+                ok, detail = _start_deskflow_now()
+
+            self.assertTrue(ok, detail)
+            self.assertIn("deskflow server start requested", detail)
+            popen_mock.assert_called_once_with([str(script)])
+            payload = json.loads(config_path.read_text())
+            self.assertTrue(payload["deskflow"]["enabled"])
+            self.assertEqual(payload["deskflow"]["role"], "server")
+
+    @patch("unixdrop.tui.sys.platform", "darwin")
+    @patch("unixdrop.tui.subprocess.run")
+    def test_current_role_detects_plain_deskflow_core_on_macos(self, run_mock) -> None:
+        def run_side_effect(command, **_kwargs):
+            pattern = command[-1]
+            returncode = 0 if pattern == "deskflow-core" else 1
+            return SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+        run_mock.side_effect = run_side_effect
+
+        self.assertEqual(_current_deskflow_role(), "server")
 
     @patch("unixdrop.tui._stop_deskflow_processes", return_value=(True, "stopped"))
     @patch("unixdrop.tui._disable_standalone_deskflow_autostarts", return_value=(True, "disabled"))

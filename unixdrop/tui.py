@@ -480,16 +480,30 @@ def _sync_receiver_endpoint(
 
 def _start_deskflow_now() -> tuple[bool, str]:
     cfg = load_config()
+    role = cfg.deskflow_role
+    role_was_off = role == "off"
+    if role_was_off:
+        default_role = _default_deskflow_role_for_platform()
+        if default_role is None:
+            return False, f"unsupported platform: {sys.platform}"
+        role = default_role
+        script = _deskflow_script_for_role(cfg, role)
+    else:
+        script = deskflow_start_script(cfg, sys.platform)
+        if script is None:
+            return False, "deskflow role is off"
+
     running_role = _current_deskflow_role()
-    if running_role and running_role == cfg.deskflow_role:
+    if running_role and running_role == role:
+        if role_was_off:
+            role_ok, role_detail = _set_deskflow_role(role)
+            if not role_ok:
+                return False, role_detail
         return True, f"deskflow {running_role} already running; no action needed"
-    script = deskflow_start_script(cfg, sys.platform)
-    if script is None:
-        return False, "deskflow role is off"
     if not script.exists():
-        return False, f"deskflow start script missing: {script}"
+        return False, f"deskflow {role} start script missing: {script}"
     if not os.access(script, os.X_OK):
-        return False, f"deskflow start script not executable: {script}"
+        return False, f"deskflow {role} start script not executable: {script}"
     try:
         proc = subprocess.Popen([str(script)])
         time.sleep(0.4)
@@ -501,7 +515,12 @@ def _start_deskflow_now() -> tuple[bool, str]:
                     "System Settings > Privacy & Security > Accessibility"
                 )
             return False, f"deskflow exited with code {return_code}; check its service log"
-        return True, f"deskflow start requested (pid={proc.pid})"
+        if role_was_off:
+            role_ok, role_detail = _set_deskflow_role(role)
+            if not role_ok:
+                return False, role_detail
+            return True, f"deskflow {role} start requested (pid={proc.pid}); {role_detail}"
+        return True, f"deskflow {role} start requested (pid={proc.pid})"
     except Exception as exc:
         return False, f"deskflow start failed: {exc}"
 
@@ -582,7 +601,12 @@ def _deskflow_role_running(role: str) -> bool:
         "server": ("deskflow-server", "deskflow-core.*server"),
         "client": ("deskflow-client", "deskflow-core.*client"),
     }
-    for pattern in patterns[role]:
+    role_patterns = list(patterns[role])
+    if role == "server" and sys.platform == "darwin":
+        role_patterns.append("deskflow-core")
+    if role == "client" and sys.platform.startswith("linux"):
+        role_patterns.append("deskflow-core")
+    for pattern in role_patterns:
         try:
             result = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
         except FileNotFoundError:
@@ -613,6 +637,7 @@ def _stop_deskflow_processes() -> tuple[bool, str]:
         "deskflow-client",
         "deskflow-core.*server",
         "deskflow-core.*client",
+        "deskflow-core",
     )
     for pattern in stop_patterns:
         try:
@@ -677,6 +702,34 @@ def _set_deskflow_off() -> tuple[bool, str]:
     except Exception as exc:
         return False, f"failed to disable Deskflow in config: {exc}"
     return True, "Deskflow disabled in config"
+
+
+def _set_deskflow_role(role: str) -> tuple[bool, str]:
+    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
+        deskflow["enabled"] = True
+        deskflow["role"] = role
+        raw["deskflow"] = deskflow
+        config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    except Exception as exc:
+        return False, f"failed to enable Deskflow {role} in config: {exc}"
+    return True, f"Deskflow enabled as {role}"
+
+
+def _default_deskflow_role_for_platform() -> str | None:
+    if sys.platform == "darwin":
+        return "server"
+    if sys.platform.startswith("linux"):
+        return "client"
+    return None
+
+
+def _deskflow_script_for_role(cfg, role: str) -> Path:
+    if role == "server":
+        return cfg.deskflow_server_start_script
+    return cfg.deskflow_client_start_script
 
 
 def _stop_all_now() -> tuple[bool, str]:
