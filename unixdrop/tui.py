@@ -27,6 +27,10 @@ from unixdrop.status import status_lines
 HEALTH_RE = re.compile(r"^\[(ok|fail)\]\s+(.+?):\s*(.*)$")
 LATENCY_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*ms$", re.IGNORECASE)
 MAX_EVENT_DETAIL = 220
+DESKFLOW_LOG_PROBLEM_RE = re.compile(
+    r"(already connected|cannot|connection refused|error|failed|incompatible|new client is unresponsive|protocol error|refused|timed out)",
+    re.IGNORECASE,
+)
 
 
 def _parse_health(lines: list[str]) -> list[tuple[bool, str, str]]:
@@ -407,6 +411,13 @@ def _process_log_path(name: str) -> Path:
     return state_dir / f"{safe_name}.log"
 
 
+def _fallback_process_log_path(name: str) -> Path:
+    safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in name)
+    tmp_root = Path(os.environ.get("TMPDIR", "/tmp")) / "deskbridge-logs"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    return tmp_root / f"{safe_name}.log"
+
+
 def _tail_file(path: Path, max_chars: int = 1200) -> str:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -421,6 +432,63 @@ def _tail_file(path: Path, max_chars: int = 1200) -> str:
     return output
 
 
+def _deskflow_log_candidates(role: str) -> list[Path]:
+    candidates = [
+        _fallback_state_dir() / f"deskflow-{role}.log",
+        Path.home() / "Library" / "Logs" / f"deskflow-{role}.log",
+    ]
+    return [path for path in candidates if path.exists()]
+
+
+def _deskflow_recent_problem(role: str) -> str | None:
+    for log_path in _deskflow_log_candidates(role):
+        tail = _tail_file(log_path, max_chars=5000)
+        for line in reversed(tail.splitlines()):
+            if DESKFLOW_LOG_PROBLEM_RE.search(line):
+                detail = f"{line} (log: {log_path})"
+                if role == "server":
+                    peer_name = _saved_deskflow_peer_name()
+                    if peer_name:
+                        detail = f"{detail}; expected client screen name: {peer_name}"
+                return detail
+    return None
+
+
+def _tcp_listen_detected(port: int) -> bool:
+    if _local_tcp_open("127.0.0.1", port):
+        return True
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _deskflow_runtime_check(status: dict[str, str]) -> tuple[bool, str, str] | None:
+    enabled = status.get("deskflow_enabled", "no").startswith("yes")
+    role = status.get("deskflow_role", "off")
+    if not enabled or role == "off":
+        return None
+
+    if role == "server" and not _tcp_listen_detected(24800):
+        return False, "Deskflow runtime", "server role is configured but TCP 24800 is not listening"
+
+    problem = _deskflow_recent_problem(role)
+    if problem:
+        return False, "Deskflow runtime", problem
+
+    if role == "server":
+        return True, "Deskflow runtime", "server listening on TCP 24800"
+    return True, "Deskflow runtime", "no recent Deskflow client errors found"
+
+
 def _spawn_logged_process(
     command: list[str],
     log_name: str,
@@ -428,15 +496,15 @@ def _spawn_logged_process(
     start_new_session: bool = False,
 ) -> tuple[subprocess.Popen, Path]:
     log_path = _process_log_path(log_name)
-    with log_path.open("a", encoding="utf-8") as handle:
+    try:
+        handle = log_path.open("a", encoding="utf-8")
+    except OSError:
+        log_path = _fallback_process_log_path(log_name)
+        handle = log_path.open("a", encoding="utf-8")
+    with handle:
         handle.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] $ {' '.join(command)}\n")
         handle.flush()
-        proc = subprocess.Popen(
-            command,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=start_new_session,
-        )
+        proc = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT, start_new_session=start_new_session)
     return proc, log_path
 
 
@@ -890,6 +958,9 @@ def _start_deskflow_now() -> tuple[bool, str]:
 
     running_role = _current_deskflow_role()
     if running_role and running_role == role:
+        problem = _deskflow_recent_problem(running_role)
+        if problem:
+            return False, f"deskflow {running_role} is running but recent logs show a transfer failure: {problem}"
         if role_was_off:
             role_ok, role_detail = _set_deskflow_role(role)
             if not role_ok:
@@ -1374,6 +1445,12 @@ def _collect_tui_snapshot(events: deque[str]) -> tuple[list[tuple[bool, str, str
             "pending files in drop folder": "unknown",
             "last upload result": f"status collection failed: {exc}",
         }
+
+    deskflow_check = _deskflow_runtime_check(status)
+    if deskflow_check:
+        checks.append(deskflow_check)
+        if not deskflow_check[0]:
+            _record_event(events, "error", f"{deskflow_check[1]}: {deskflow_check[2]}")
 
     return checks, status
 

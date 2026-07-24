@@ -19,6 +19,7 @@ from unixdrop.tui import (
     _configure_startup_deskflow,
     _current_deskflow_role,
     _deskflow_endpoint_from_host,
+    _deskflow_runtime_check,
     _drop_panel_lines,
     _first_endpoint_host,
     _open_drop_folder_now,
@@ -105,6 +106,45 @@ class TuiTests(unittest.TestCase):
         rendered_events = "\n".join(events)
         self.assertIn("health collection failed", rendered_events)
         self.assertIn("status collection failed", rendered_events)
+
+    @patch("unixdrop.tui._local_tcp_open", return_value=True)
+    def test_deskflow_runtime_check_reports_recent_server_handshake_failure(self, _tcp_mock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / "state"
+            state_dir.mkdir()
+            (state_dir / "deskflow-server.log").write_text(
+                "[2026-07-24T08:39:57.570] NOTE: new client is unresponsive\n",
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth_token": "token",
+                        "receiver_url": "http://192.168.1.103:8765",
+                        "state_dir": str(state_dir),
+                        "deskflow": {
+                            "enabled": True,
+                            "role": "server",
+                            "peer_name": "Kashira",
+                        },
+                    }
+                )
+            )
+            status = {
+                "deskflow_enabled": "yes",
+                "deskflow_role": "server",
+            }
+
+            with patch.dict(os.environ, {ENV_CONFIG_PATH: str(config_path)}):
+                check = _deskflow_runtime_check(status)
+
+        self.assertIsNotNone(check)
+        assert check is not None
+        self.assertFalse(check[0])
+        self.assertIn("new client is unresponsive", check[2])
+        self.assertIn("expected client screen name: Kashira", check[2])
 
     def test_deskflow_endpoint_from_plain_host_adds_port(self) -> None:
         self.assertEqual(_deskflow_endpoint_from_host("192.168.1.50"), "192.168.1.50:24800")
