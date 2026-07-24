@@ -253,9 +253,9 @@ def _client_script_body(
 ) -> str:
     binary, mode = command
     if mode == "client":
-        exec_line = f"exec {_quote(binary)} client -s {_quote(settings_file)}"
+        run_line = f"{_quote(binary)} client -s {_quote(settings_file)}"
     else:
-        exec_line = f"exec {_quote(binary)} --no-daemon --name {_quote(client_name)} \"${{selected_server}}\""
+        run_line = f"{_quote(binary)} --no-daemon --name {_quote(client_name)} \"${{selected_server}}\""
 
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -343,25 +343,50 @@ checkPeerFingerprints=false
 SETTINGS
 }}
 
+DESKBRIDGE_CLIENT_LOCK_DIR=""
+
+cleanup_client_lock_runtime() {{
+  if [[ -n "${{DESKBRIDGE_CLIENT_LOCK_DIR:-}}" ]]; then
+    rm -rf "${{DESKBRIDGE_CLIENT_LOCK_DIR}}" >/dev/null 2>&1 || true
+  fi
+}}
+
+pid_is_deskflow_runtime() {{
+  local pid="$1"
+  local command_line=""
+  [[ -n "${{pid}}" ]] || return 1
+  kill -0 "${{pid}}" >/dev/null 2>&1 || return 1
+  if command -v ps >/dev/null 2>&1; then
+    command_line="$(ps -p "${{pid}}" -o command= 2>/dev/null || true)"
+    printf '%s\n' "${{command_line}}" | grep -Eiq 'deskflow|barrier|synergy'
+    return $?
+  fi
+  return 0
+}}
+
 guard_single_client_instance_runtime() {{
   local lock_token={_quote("".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in client_name))}
   local lock_dir="${{TMPDIR:-/tmp}}/deskbridge-deskflow-client-${{lock_token}}.lock"
   local lock_pid_file="${{lock_dir}}/pid"
   local existing_pid=""
   if mkdir "${{lock_dir}}" >/dev/null 2>&1; then
+    DESKBRIDGE_CLIENT_LOCK_DIR="${{lock_dir}}"
     printf '%s\n' "$$" > "${{lock_pid_file}}"
+    trap cleanup_client_lock_runtime EXIT INT TERM
     return 0
   fi
   if [[ -f "${{lock_pid_file}}" ]]; then
     existing_pid="$(cat "${{lock_pid_file}}" 2>/dev/null || true)"
-    if [[ -n "${{existing_pid}}" ]] && kill -0 "${{existing_pid}}" >/dev/null 2>&1; then
+    if pid_is_deskflow_runtime "${{existing_pid}}"; then
       echo "Deskflow client already running for {client_name} (pid=${{existing_pid}}); skipping duplicate start."
       exit 0
     fi
   fi
   rm -rf "${{lock_dir}}" >/dev/null 2>&1 || true
   if mkdir "${{lock_dir}}" >/dev/null 2>&1; then
+    DESKBRIDGE_CLIENT_LOCK_DIR="${{lock_dir}}"
     printf '%s\n' "$$" > "${{lock_pid_file}}"
+    trap cleanup_client_lock_runtime EXIT INT TERM
     return 0
   fi
   echo "Could not acquire Deskflow client start lock: ${{lock_dir}}" >&2
@@ -376,7 +401,7 @@ if [[ -z "${{selected_server}}" ]]; then
   exit 1
 fi
 update_remote_host_runtime "${{selected_server}}"
-{exec_line}
+{run_line}
 """
 
 

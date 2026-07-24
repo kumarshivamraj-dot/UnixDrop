@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from unixdrop import __version__
 from unixdrop.clipboard_safety import HEALTH_CHECK_CLIPBOARD_SOURCE, is_health_check_clipboard_text
 from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
-from unixdrop.vault import build_manifest, manifest_to_json, should_skip_relative
+from unixdrop.vault import build_manifest, manifest_to_json, should_skip_relative, vault_path, write_bytes_atomic
 
 
 CONFIG = load_config()
@@ -637,8 +637,9 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.BAD_REQUEST, "invalid vault path")
             return
 
-        file_path = (CONFIG.obsidian_vault_dir / requested).resolve()
-        if not str(file_path).startswith(str(CONFIG.obsidian_vault_dir.resolve())):
+        try:
+            file_path = vault_path(CONFIG.obsidian_vault_dir, requested)
+        except ValueError:
             self._reject(HTTPStatus.BAD_REQUEST, "invalid vault path")
             return
         if not file_path.exists() or not file_path.is_file():
@@ -666,8 +667,9 @@ class UnixDropHandler(BaseHTTPRequestHandler):
             self._reject(HTTPStatus.BAD_REQUEST, "invalid file metadata")
             return
 
-        destination = (CONFIG.obsidian_vault_dir / relative_path).resolve()
-        if not str(destination).startswith(str(CONFIG.obsidian_vault_dir.resolve())):
+        try:
+            destination = vault_path(CONFIG.obsidian_vault_dir, relative_path)
+        except ValueError:
             self._reject(HTTPStatus.BAD_REQUEST, "invalid vault path")
             return
 
@@ -675,10 +677,7 @@ class UnixDropHandler(BaseHTTPRequestHandler):
         if error:
             self._reject(HTTPStatus.BAD_REQUEST, error)
             return
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
-        if mtime > 0:
-            os.utime(destination, (mtime, mtime))
+        write_bytes_atomic(destination, data, mtime)
 
         self._json_response(
             HTTPStatus.OK,

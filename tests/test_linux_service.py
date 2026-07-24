@@ -149,6 +149,31 @@ class LinuxServiceTests(unittest.TestCase):
             self.module.DESKFLOW_RETRY_AFTER = 0.0
             self.module.DESKFLOW_SUPERVISION_DISABLED = False
 
+    def test_vault_atomic_write_replaces_existing_file(self) -> None:
+        vault = Path(self._tempdir.name) / "atomic-vault"
+        destination = vault / "nested" / "note.md"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("old", encoding="utf-8")
+
+        self.module.write_bytes_atomic(destination, b"incoming", 123.0)
+
+        self.assertEqual(destination.read_bytes(), b"incoming")
+        self.assertAlmostEqual(destination.stat().st_mtime, 123.0, delta=1.0)
+        self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
+
+    def test_vault_path_rejects_sibling_prefix_escape(self) -> None:
+        root = Path(self._tempdir.name)
+        vault = root / "vault"
+        vault.mkdir(parents=True, exist_ok=True)
+
+        with self.assertRaises(ValueError):
+            self.module.vault_path(vault, "../vault2/note.md")
+
+        self.assertEqual(
+            self.module.vault_path(vault, "nested/note.md"),
+            (vault / "nested" / "note.md").resolve(strict=False),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

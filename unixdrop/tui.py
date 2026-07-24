@@ -4,6 +4,7 @@ import json
 import os
 import re
 import select
+import secrets
 import socket
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from unixdrop.status import status_lines
 
 HEALTH_RE = re.compile(r"^\[(ok|fail)\]\s+(.+?):\s*(.*)$")
 LATENCY_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*ms$", re.IGNORECASE)
+MAX_EVENT_DETAIL = 220
 
 
 def _parse_health(lines: list[str]) -> list[tuple[bool, str, str]]:
@@ -46,6 +48,18 @@ def _collect_status_map(lines: list[str]) -> dict[str, str]:
         key, value = line.split(":", 1)
         details[key.strip().lower()] = value.strip()
     return details
+
+
+def _event_line(level: str, detail: str) -> str:
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    clean = " ".join(str(detail).split())
+    if len(clean) > MAX_EVENT_DETAIL:
+        clean = clean[: MAX_EVENT_DETAIL - 3] + "..."
+    return f"{timestamp} {level.upper()}: {clean}"
+
+
+def _record_event(events: deque[str], level: str, detail: str) -> None:
+    events.append(_event_line(level, detail))
 
 
 def _green(text: str) -> str:
@@ -108,6 +122,12 @@ def _prompt_line(prompt: str) -> str:
         return input(prompt)
     finally:
         tty.setcbreak(fd)
+
+
+def _prompt_line_cooked(prompt: str) -> str:
+    if not sys.stdin.isatty():
+        return ""
+    return input(prompt)
 
 
 def _default_client_name() -> str:
@@ -272,6 +292,162 @@ def _run_deskflow_setup(command_args: list[str]) -> tuple[bool, str]:
     return False, f"exit code {result}"
 
 
+def _active_config_path() -> Path:
+    return Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
+
+
+def _read_config_payload() -> tuple[dict, str | None]:
+    config_path = _active_config_path()
+    if not config_path.exists():
+        return {}, f"unixdrop config missing: {config_path}"
+    try:
+        loaded = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, f"failed to read unixdrop config: {exc}"
+    if not isinstance(loaded, dict):
+        return {}, f"unixdrop config must be a JSON object: {config_path}"
+    return loaded, None
+
+
+def _write_config_payload(payload: dict) -> None:
+    config_path = _active_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.with_name(f".{config_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_path, config_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _default_tui_config_payload() -> dict:
+    inbox_dir = "~/UnixDrop/Inbox"
+    drop_dir = "~/UnixDrop/Drop"
+    return {
+        "auth_token": secrets.token_urlsafe(32),
+        "receiver_url": "http://127.0.0.1:8765",
+        "receiver": {
+            "listen_host": "0.0.0.0",
+            "port": 8765,
+            "auto_open_links": True,
+        },
+        "inbox_dir": inbox_dir,
+        "drop_dir": drop_dir,
+        "link_log_path": f"{inbox_dir}/link-log.jsonl",
+        "state_dir": "~/.local/state/unixdrop",
+        "drop": {
+            "delete_after_send": False,
+            "max_file_mb": 500,
+        },
+        "clipboard": {
+            "mode": "off",
+            "max_chars": 20000,
+        },
+        "tabs": {
+            "default_browser": "auto",
+            "firefox_debug_url": "http://127.0.0.1:9222",
+        },
+        "deskflow": {
+            "role": "off",
+            "server_start_script": "~/.config/deskflow/start-deskflow-server.sh",
+            "client_start_script": "~/.config/deskflow/start-deskflow-client.sh",
+        },
+        "obsidian": {
+            "enabled": False,
+            "local_vault": "~/Obsidian/MainVault",
+            "remote_vault": "",
+            "conflict_strategy": "copy",
+        },
+    }
+
+
+def _ensure_runtime_dirs(cfg) -> tuple[bool, str]:
+    try:
+        cfg.inbox_dir.mkdir(parents=True, exist_ok=True)
+        cfg.drop_dir.mkdir(parents=True, exist_ok=True)
+        cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        cfg.link_log_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return False, f"failed to create runtime directories: {exc}"
+    return True, f"runtime directories ready: inbox={cfg.inbox_dir}, drop={cfg.drop_dir}"
+
+
+def _bootstrap_tui_config() -> tuple[bool, str]:
+    config_path = _active_config_path()
+    created = False
+    if not config_path.exists():
+        try:
+            _write_config_payload(_default_tui_config_payload())
+            created = True
+        except Exception as exc:
+            return False, f"failed to create unixdrop config at {config_path}: {exc}"
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        return False, f"config load failed: {exc}"
+    dirs_ok, dirs_detail = _ensure_runtime_dirs(cfg)
+    if not dirs_ok:
+        return False, dirs_detail
+    if created:
+        return True, f"created starter config at {config_path}; {dirs_detail}"
+    return True, dirs_detail
+
+
+def _fallback_state_dir() -> Path:
+    try:
+        return load_config().state_dir
+    except Exception:
+        return Path("~/.local/state/unixdrop").expanduser()
+
+
+def _process_log_path(name: str) -> Path:
+    safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in name)
+    state_dir = _fallback_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir / f"{safe_name}.log"
+
+
+def _tail_file(path: Path, max_chars: int = 1200) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    output = "\n".join(lines[-12:])
+    if len(output) > max_chars:
+        output = output[-max_chars:]
+    return output
+
+
+def _spawn_logged_process(
+    command: list[str],
+    log_name: str,
+    *,
+    start_new_session: bool = False,
+) -> tuple[subprocess.Popen, Path]:
+    log_path = _process_log_path(log_name)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] $ {' '.join(command)}\n")
+        handle.flush()
+        proc = subprocess.Popen(
+            command,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=start_new_session,
+        )
+    return proc, log_path
+
+
+def _exit_detail_with_log(prefix: str, return_code: int, log_path: Path) -> str:
+    detail = f"{prefix} exited with code {return_code}; log: {log_path}"
+    tail = _tail_file(log_path)
+    if tail:
+        detail = f"{detail}; recent output: {tail}"
+    return detail
+
+
 def _apply_client_server_hosts(server_hosts: str) -> tuple[bool, str]:
     endpoints = server_hosts.strip()
     command = [
@@ -295,12 +471,40 @@ def _apply_client_server_hosts(server_hosts: str) -> tuple[bool, str]:
     return False, f"failed to save endpoints: {detail}"
 
 
+def _apply_deskflow_endpoints(
+    *,
+    role: str,
+    server_hosts: str = "",
+    client_name: str = "",
+) -> tuple[bool, str]:
+    if role == "server":
+        screen_name = client_name.strip() or _saved_deskflow_peer_name()
+        if not screen_name:
+            return False, "client screen name is required for Deskflow server setup"
+        command = [
+            "--role",
+            "server",
+            "--client-name",
+            screen_name,
+            "--direction",
+            "right",
+        ]
+        ok, detail = _run_deskflow_setup(command)
+        if ok:
+            return True, f"saved server screen for client: {screen_name}"
+        return False, f"failed to save server setup: {detail}"
+
+    if role == "client":
+        return _apply_client_server_hosts(server_hosts)
+
+    return False, f"unsupported Deskflow role: {role}"
+
+
 def _update_quick_setup_config(role: str, peer_name: str = "") -> tuple[bool, str]:
-    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
-    if not config_path.exists():
-        return False, f"unixdrop config missing: {config_path}"
+    raw, error = _read_config_payload()
+    if error:
+        return False, error
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
         clipboard = raw.get("clipboard") if isinstance(raw.get("clipboard"), dict) else {}
         clipboard["mode"] = "two_way"
         raw["clipboard"] = clipboard
@@ -316,17 +520,15 @@ def _update_quick_setup_config(role: str, peer_name: str = "") -> tuple[bool, st
         if peer_name.strip():
             deskflow["peer_name"] = peer_name.strip()
         raw["deskflow"] = deskflow
-        config_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        _write_config_payload(raw)
     except Exception as exc:
         return False, f"failed to update unixdrop config: {exc}"
     return True, f"saved {role} role and enabled two-way clipboard"
 
 
 def _saved_deskflow_peer_name() -> str:
-    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
+    raw, error = _read_config_payload()
+    if error:
         return ""
     deskflow = raw.get("deskflow") if isinstance(raw.get("deskflow"), dict) else {}
     return str(deskflow.get("peer_name", "")).strip()
@@ -379,6 +581,167 @@ def _quick_setup_deskflow(peer_hostname: str = "") -> tuple[bool, str]:
     return True, f"ready as {role}; {start_detail}"
 
 
+def _configure_startup_deskflow(
+    *,
+    peer_receiver: str = "",
+    server_host: str = "",
+    client_name: str = "",
+    direction: str = "right",
+) -> tuple[bool, str]:
+    if sys.platform == "darwin":
+        role = "server"
+        screen_name = client_name.strip() or _saved_deskflow_peer_name() or "peer-laptop"
+        command = [
+            "--role",
+            role,
+            "--client-name",
+            screen_name,
+            "--direction",
+            direction,
+        ]
+        receiver_input = peer_receiver.strip()
+        receiver_label = "unchanged"
+    elif sys.platform.startswith("linux"):
+        role = "client"
+        raw_server = server_host.strip() or peer_receiver.strip()
+        server_endpoint = _deskflow_endpoint_from_host(raw_server)
+        if not server_endpoint:
+            return False, "Deskflow server IP/host is required on the client machine"
+        command = [
+            "--role",
+            role,
+            "--server-hosts",
+            server_endpoint,
+            "--client-name",
+            _default_client_name(),
+        ]
+        receiver_input = peer_receiver.strip() or raw_server
+        receiver_label = server_endpoint
+    else:
+        return False, f"automatic startup setup is unsupported on {sys.platform}"
+
+    receiver_url = _receiver_url_from_host(receiver_input)
+    if receiver_url:
+        recv_ok, recv_detail = _sync_receiver_endpoint("", receiver_url)
+    else:
+        recv_ok, recv_detail = True, "receiver endpoint unchanged"
+    if not recv_ok:
+        return False, recv_detail
+
+    disabled, disable_detail = _disable_standalone_deskflow_autostarts()
+    if not disabled:
+        return False, disable_detail
+    stopped, stop_detail = _stop_deskflow_processes()
+    if not stopped:
+        return False, stop_detail
+
+    ok, detail = _run_deskflow_setup(command)
+    if not ok:
+        return False, f"Deskflow setup failed: {detail}"
+    config_ok, config_detail = _update_quick_setup_config(
+        role, screen_name if role == "server" else ""
+    )
+    if not config_ok:
+        return False, config_detail
+    started, start_detail = _start_deskflow_now()
+    if not started:
+        return False, f"{config_detail}; {start_detail}"
+    if role == "server":
+        return True, f"server ready for {screen_name}; {recv_detail}; {start_detail}"
+    return True, f"client ready for {receiver_label}; {recv_detail}; {start_detail}"
+
+
+def _receiver_host_is_placeholder(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    return normalized in {"", "127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}
+
+
+def _configured_peer_receiver_host() -> str:
+    candidates: list[str] = []
+    try:
+        cfg = load_config()
+        parsed = urlparse(cfg.receiver_url)
+        if parsed.hostname:
+            candidates.append(parsed.hostname)
+    except Exception:
+        pass
+
+    raw, error = _read_config_payload()
+    if not error:
+        receiver = raw.get("receiver") if isinstance(raw.get("receiver"), dict) else {}
+        host = str(receiver.get("host", "")).strip()
+        if host:
+            candidates.append(host)
+
+    for candidate in candidates:
+        if not _receiver_host_is_placeholder(candidate):
+            return candidate
+    return candidates[0] if candidates else ""
+
+
+def _startup_setup_needed() -> tuple[bool, str]:
+    expected_role = _default_deskflow_role_for_platform()
+    if expected_role is None:
+        return False, f"automatic startup setup is unsupported on {sys.platform}"
+
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        return True, f"config needs setup: {exc}"
+
+    missing: list[str] = []
+    if cfg.deskflow_role != expected_role or not cfg.deskflow_enabled:
+        missing.append(f"Deskflow {expected_role} role")
+
+    script = _deskflow_script_for_role(cfg, expected_role)
+    if not script.exists():
+        missing.append(f"Deskflow {expected_role} start script")
+    elif not os.access(script, os.X_OK):
+        missing.append(f"executable Deskflow {expected_role} start script")
+
+    peer_receiver = _configured_peer_receiver_host()
+    if _receiver_host_is_placeholder(peer_receiver):
+        missing.append("peer UnixDrop IP/host")
+
+    if expected_role == "server" and not _saved_deskflow_peer_name():
+        missing.append("Deskflow client screen name")
+
+    if missing:
+        return True, "startup setup needed: " + ", ".join(missing)
+    return False, "startup setup already complete"
+
+
+def _prompt_line_default(prompt: str, default: str = "") -> str:
+    clean_default = default.strip()
+    suffix = f" [{clean_default}]" if clean_default else ""
+    entered = _prompt_line_cooked(f"{prompt}{suffix}: ").strip()
+    return entered or clean_default
+
+
+def _startup_deskflow_prompt(reason: str = "") -> tuple[bool, str]:
+    if not sys.stdin.isatty():
+        return True, "startup setup skipped (non-interactive terminal)"
+    _clear()
+    print(_cyan("Deskbridge startup setup"))
+    if reason:
+        print(reason)
+    print("Enter the peer addresses once. Saved values will be reused on later starts.")
+    print("")
+    peer_default = _configured_peer_receiver_host()
+    if sys.platform == "darwin":
+        peer_receiver = _prompt_line_default("Peer UnixDrop IP/host (Linux)", peer_default)
+        client_name = _prompt_line_default(
+            "Deskflow client screen name (Linux hostname)",
+            _saved_deskflow_peer_name() or "peer-laptop",
+        )
+        return _configure_startup_deskflow(peer_receiver=peer_receiver, client_name=client_name)
+    if sys.platform.startswith("linux"):
+        server_host = _prompt_line_default("Deskflow server IP/host (Mac)", peer_default)
+        peer_receiver = _prompt_line_default("Peer UnixDrop IP/host", server_host)
+        return _configure_startup_deskflow(peer_receiver=peer_receiver, server_host=server_host)
+    return False, f"automatic startup setup is unsupported on {sys.platform}"
+
+
 def _first_endpoint_host(server_hosts: str) -> str:
     for raw in server_hosts.split(","):
         endpoint = raw.strip()
@@ -390,6 +753,43 @@ def _first_endpoint_host(server_hosts: str) -> str:
             return endpoint.split(":", 1)[0].strip()
         return endpoint
     return ""
+
+
+def _host_port_endpoint(value: str, default_port: int) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        host, port = _parse_receiver_override(text)
+    except (TypeError, ValueError):
+        return text
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{port or default_port}"
+
+
+def _receiver_url_from_host(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        host, _port = _parse_receiver_override(text)
+    except (TypeError, ValueError):
+        host = text
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:8765"
+
+
+def _receiver_url_from_override(value: str) -> str:
+    endpoint = _host_port_endpoint(value, 8765)
+    if not endpoint:
+        return ""
+    return f"http://{endpoint}"
+
+
+def _deskflow_endpoint_from_host(value: str) -> str:
+    return _host_port_endpoint(value, 24800)
 
 
 def _parse_receiver_override(value: str) -> tuple[str, int | None]:
@@ -441,14 +841,9 @@ def _sync_receiver_endpoint(
         if not host:
             return True, "receiver endpoint unchanged (LAN discovery only)"
 
-    config_path = Path(os.environ.get(ENV_CONFIG_PATH, str(DEFAULT_CONFIG_PATH))).expanduser()
-    if not config_path.exists():
-        return False, f"unixdrop config missing: {config_path}"
-
-    try:
-        raw = json.loads(config_path.read_text())
-    except Exception as exc:
-        return False, f"failed to read unixdrop config: {exc}"
+    raw, error = _read_config_payload()
+    if error:
+        return False, error
 
     receiver = raw.get("receiver") if isinstance(raw.get("receiver"), dict) else {}
     receiver_url = str(raw.get("receiver_url", "")).strip()
@@ -471,7 +866,7 @@ def _sync_receiver_endpoint(
     raw["receiver_url"] = f"http://{host}:{port}"
 
     try:
-        config_path.write_text(json.dumps(raw, indent=2) + "\n")
+        _write_config_payload(raw)
     except Exception as exc:
         return False, f"failed to write unixdrop config: {exc}"
 
@@ -504,23 +899,25 @@ def _start_deskflow_now() -> tuple[bool, str]:
         return False, f"deskflow {role} start script missing: {script}"
     if not os.access(script, os.X_OK):
         return False, f"deskflow {role} start script not executable: {script}"
+    log_name = f"deskflow-{role}"
     try:
-        proc = subprocess.Popen([str(script)])
+        proc, log_path = _spawn_logged_process([str(script)], log_name)
         time.sleep(0.4)
         return_code = proc.poll()
         if return_code is not None:
             if sys.platform == "darwin":
+                detail = _exit_detail_with_log("deskflow", return_code, log_path)
                 return False, (
-                    f"deskflow exited with code {return_code}; allow Deskflow in "
+                    f"{detail}; allow Deskflow in "
                     "System Settings > Privacy & Security > Accessibility"
                 )
-            return False, f"deskflow exited with code {return_code}; check its service log"
+            return False, _exit_detail_with_log("deskflow", return_code, log_path)
         if role_was_off:
             role_ok, role_detail = _set_deskflow_role(role)
             if not role_ok:
                 return False, role_detail
-            return True, f"deskflow {role} start requested (pid={proc.pid}); {role_detail}"
-        return True, f"deskflow {role} start requested (pid={proc.pid})"
+            return True, f"deskflow {role} start requested (pid={proc.pid}; log={log_path}); {role_detail}"
+        return True, f"deskflow {role} start requested (pid={proc.pid}; log={log_path})"
     except Exception as exc:
         return False, f"deskflow start failed: {exc}"
 
@@ -552,22 +949,61 @@ def _local_tcp_open(host: str, port: int) -> bool:
         return False
 
 
+def _receiver_probe_host(listen_host: str) -> str:
+    host = str(listen_host or "").strip()
+    if host in {"", "0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def _wait_for_receiver_start(
+    proc: subprocess.Popen,
+    host: str,
+    port: int,
+    timeout_seconds: float = 2.0,
+    log_path: Path | None = None,
+) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _local_tcp_open(host, port):
+            detail = f"local receiver listening on {host}:{port} (pid={proc.pid})"
+            if log_path is not None:
+                detail = f"{detail}; log={log_path}"
+            return True, detail
+        return_code = proc.poll()
+        if return_code is not None:
+            if log_path is not None:
+                return False, _exit_detail_with_log("local receiver", return_code, log_path)
+            return False, f"local receiver exited with code {return_code}"
+        time.sleep(0.1)
+    detail = f"local receiver start requested but {host}:{port} did not become reachable"
+    if log_path is not None:
+        tail = _tail_file(log_path)
+        detail = f"{detail}; log: {log_path}"
+        if tail:
+            detail = f"{detail}; recent output: {tail}"
+    return False, detail
+
+
 def _start_local_receiver_now() -> tuple[bool, str]:
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except Exception as exc:
+        return False, f"local receiver not started because config could not be loaded: {exc}"
     receiver_port = int(cfg.port)
-    if _local_tcp_open("127.0.0.1", receiver_port):
-        return True, f"local receiver already listening on 127.0.0.1:{receiver_port}"
+    probe_host = _receiver_probe_host(getattr(cfg, "listen_host", "0.0.0.0"))
+    if _local_tcp_open(probe_host, receiver_port):
+        return True, f"local receiver already listening on {probe_host}:{receiver_port}"
 
     try:
-        proc = subprocess.Popen(
+        proc, log_path = _spawn_logged_process(
             [sys.executable, "-m", "unixdrop.linux_service"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            "local-receiver",
             start_new_session=True,
         )
-        return True, f"local receiver start requested (pid={proc.pid})"
     except Exception as exc:
         return False, f"local receiver start failed: {exc}"
+    return _wait_for_receiver_start(proc, probe_host, receiver_port, log_path=log_path)
 
 
 def _start_linux_receiver_now() -> tuple[bool, str]:
@@ -575,25 +1011,36 @@ def _start_linux_receiver_now() -> tuple[bool, str]:
 
 
 def _restart_deskflow_client_now() -> tuple[bool, str]:
-    cfg = load_config()
-    script = cfg.deskflow_client_start_script
-    if not script.exists():
-        return False, f"deskflow client start script missing: {script}"
-    if not os.access(script, os.X_OK):
-        return False, f"deskflow client start script not executable: {script}"
+    return _restart_deskflow_role_now("client")
 
-    # Ensure endpoint changes apply immediately by dropping stale client processes first.
-    for command in (["pkill", "-f", "deskflow-client"], ["pkill", "-f", "deskflow-core.*client"]):
-        try:
-            subprocess.run(command, capture_output=True, text=True, check=False)
-        except FileNotFoundError:
-            break
+
+def _restart_deskflow_role_now(role: str) -> tuple[bool, str]:
+    if role not in {"server", "client"}:
+        return False, f"unsupported Deskflow role: {role}"
 
     try:
-        proc = subprocess.Popen([str(script)])
-        return True, f"deskflow client restart requested (pid={proc.pid})"
+        script = _configured_deskflow_script_for_role(role)
     except Exception as exc:
-        return False, f"deskflow client restart failed: {exc}"
+        return False, f"failed to load Deskflow config: {exc}"
+    if not script.exists():
+        return False, f"deskflow {role} start script missing: {script}"
+    if not os.access(script, os.X_OK):
+        return False, f"deskflow {role} start script not executable: {script}"
+
+    stopped, stop_detail = _stop_deskflow_processes()
+    if not stopped:
+        return False, stop_detail
+
+    try:
+        proc, log_path = _spawn_logged_process([str(script)], f"deskflow-{role}")
+        time.sleep(0.4)
+        return_code = proc.poll()
+    except Exception as exc:
+        return False, f"deskflow {role} restart failed: {exc}"
+
+    if return_code is not None:
+        return False, _exit_detail_with_log(f"deskflow {role}", return_code, log_path)
+    return True, f"deskflow {role} restart requested (pid={proc.pid}; log={log_path}; {stop_detail})"
 
 
 def _deskflow_role_running(role: str) -> bool:
@@ -601,12 +1048,7 @@ def _deskflow_role_running(role: str) -> bool:
         "server": ("deskflow-server", "deskflow-core.*server"),
         "client": ("deskflow-client", "deskflow-core.*client"),
     }
-    role_patterns = list(patterns[role])
-    if role == "server" and sys.platform == "darwin":
-        role_patterns.append("deskflow-core")
-    if role == "client" and sys.platform.startswith("linux"):
-        role_patterns.append("deskflow-core")
-    for pattern in role_patterns:
+    for pattern in patterns[role]:
         try:
             result = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
         except FileNotFoundError:
@@ -627,7 +1069,11 @@ def _current_deskflow_role() -> str | None:
 def _configured_deskflow_script_for_role(role: str) -> Path:
     cfg = load_config()
     if role == "server":
+        if hasattr(cfg, "deskflow_server_start_script"):
+            return cfg.deskflow_server_start_script
         return cfg.deskflow_mac_start_script
+    if hasattr(cfg, "deskflow_client_start_script"):
+        return cfg.deskflow_client_start_script
     return cfg.deskflow_linux_start_script
 
 
@@ -780,6 +1226,7 @@ def _stop_all_now() -> tuple[bool, str]:
         "deskflow-client",
         "deskflow-core.*server",
         "deskflow-core.*client",
+        "deskflow-core",
         "unixdrop/discovery.py.*serve",
         "-m unixdrop.linux_service",
         "-m unixdrop.node",
@@ -823,8 +1270,8 @@ def _swap_deskflow_role_now() -> tuple[bool, str]:
         return False, stop_detail
 
     try:
-        proc = subprocess.Popen([str(script)])
-        return True, f"deskflow switched {current_role} -> {next_role} (pid={proc.pid})"
+        proc, log_path = _spawn_logged_process([str(script)], f"deskflow-{next_role}")
+        return True, f"deskflow switched {current_role} -> {next_role} (pid={proc.pid}; log={log_path})"
     except Exception as exc:
         return False, f"deskflow role switch failed: {exc}"
 
@@ -836,6 +1283,7 @@ def _render(
     latency_samples: list[float],
     interval: float,
     message: str,
+    events: list[str] | None = None,
 ) -> None:
     _clear()
     print(_cyan("Deskbridge TUI"))
@@ -891,23 +1339,75 @@ def _render(
     for ok, name, detail in checks:
         label = _green("OK  ") if ok else _red("FAIL")
         print(f"  {label}  {name:<28} |  {detail}")
+    if events:
+        print("")
+        print(_dim("Recent events"))
+        width = max(_terminal_width() - 4, 40)
+        for event in events[-8:]:
+            print(f"  {_truncate_middle(event, width)}")
+
+
+def _collect_tui_snapshot(events: deque[str]) -> tuple[list[tuple[bool, str, str]], dict[str, str]]:
+    try:
+        health_source = health_lines()
+        checks = _parse_health(health_source)
+    except Exception as exc:
+        detail = f"health collection failed: {exc}"
+        _record_event(events, "error", detail)
+        checks = [(False, "TUI health collection", str(exc))]
+
+    try:
+        status_source = status_lines()
+        status = _collect_status_map(status_source)
+    except Exception as exc:
+        detail = f"status collection failed: {exc}"
+        _record_event(events, "error", detail)
+        status = {
+            "peer receiver reachable": "unknown",
+            "peer receiver latency": "unknown",
+            "clipboard_mode": "unknown",
+            "deskflow_enabled": "no",
+            "deskflow_role": "off",
+            "peer hostname": "unknown",
+            "local drop folder": "unknown",
+            "local inbox": "unknown",
+            "pending files in drop folder": "unknown",
+            "last upload result": f"status collection failed: {exc}",
+        }
+
+    return checks, status
 
 
 def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
     interval = max(interval_seconds, 0.5)
     message = "ready"
     latency_samples = deque(maxlen=8)
+    events = deque(maxlen=10)
+    bootstrap_ok, bootstrap_detail = _bootstrap_tui_config()
+    message = bootstrap_detail if bootstrap_ok else f"error: {bootstrap_detail}"
+    _record_event(events, "info" if bootstrap_ok else "error", bootstrap_detail)
     receiver_ok, receiver_detail = _start_local_receiver_now()
-    message = receiver_detail if receiver_ok else f"warning: {receiver_detail}"
+    _record_event(events, "info" if receiver_ok else "warn", receiver_detail)
+    if bootstrap_ok:
+        message = receiver_detail if receiver_ok else f"warning: {receiver_detail}"
+    if not once and sys.stdin.isatty():
+        setup_needed, setup_detail = _startup_setup_needed()
+        if setup_needed:
+            _record_event(events, "warn", setup_detail)
+            setup_ok, setup_detail = _startup_deskflow_prompt(setup_detail)
+            message = setup_detail if setup_ok else f"error: {setup_detail}"
+            _record_event(events, "info" if setup_ok else "error", setup_detail)
+        else:
+            message = f"{message}; {setup_detail}"
+            _record_event(events, "info", setup_detail)
     with _raw_stdin():
         while True:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            health = _parse_health(health_lines())
-            status = _collect_status_map(status_lines())
+            health, status = _collect_tui_snapshot(events)
             latency_ms = _parse_latency_ms(status.get("peer receiver latency", "unknown"))
             if latency_ms is not None:
                 latency_samples.append(latency_ms)
-            _render(now, health, status, list(latency_samples), interval, message)
+            _render(now, health, status, list(latency_samples), interval, message, list(events))
             if once:
                 return 0
             key = _read_key(interval)
@@ -916,24 +1416,35 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
             if not key:
                 continue
             if key.lower() == "e":
-                entered = _prompt_line("Server endpoints (blank=LAN discovery, or lan:24800,tailnet:24800): ").strip()
-                if not entered:
-                    receiver_override = None
-                    prefix = "using LAN discovery"
+                deskflow_role = status.get("deskflow_role", "off")
+                if deskflow_role == "off":
+                    default_role = _default_deskflow_role_for_platform()
+                    deskflow_role = default_role or "off"
+                if deskflow_role == "server":
+                    entered = ""
+                    client_name = _prompt_line("Deskflow client screen name: ").strip()
+                    prefix = "saved server setup"
+                    endpoint_label = client_name or _saved_deskflow_peer_name() or "client screen"
                 else:
-                    receiver_override = None
-                    prefix = "saved endpoints"
-                endpoint_label = entered or "LAN discovery"
-                receiver_input = _prompt_line(
-                    "Peer receiver IP/host for UnixDrop (blank=same as first server host; discovery leaves unchanged): "
-                ).strip()
+                    entered = _prompt_line(
+                        "Server endpoints (blank=LAN discovery, or lan:24800,tailnet:24800): "
+                    ).strip()
+                    client_name = ""
+                    prefix = "using LAN discovery" if not entered else "saved endpoints"
+                    endpoint_label = entered or "LAN discovery"
+                receiver_input = _prompt_line("Peer UnixDrop IP/host (blank=same as first server host): ").strip()
+                receiver_override = None
                 if receiver_input:
-                    receiver_override = receiver_input
-                ok, detail = _apply_client_server_hosts(entered)
+                    receiver_override = _receiver_url_from_override(receiver_input)
+                ok, detail = _apply_deskflow_endpoints(
+                    role=deskflow_role,
+                    server_hosts=entered,
+                    client_name=client_name,
+                )
                 recv_ok, recv_detail = _sync_receiver_endpoint(entered, receiver_override)
                 message = detail
                 if ok:
-                    _, start_detail = _restart_deskflow_client_now()
+                    _, start_detail = _restart_deskflow_role_now(deskflow_role)
                     message = f"{prefix}: {endpoint_label} | {recv_detail} | {start_detail}"
                     if not recv_ok:
                         message = f"{prefix}: {endpoint_label} | warning: {recv_detail} | {start_detail}"
@@ -941,24 +1452,30 @@ def run_tui(interval_seconds: float = 3.0, once: bool = False) -> int:
                     message = f"{detail} | {recv_detail}"
                     if not recv_ok:
                         message = f"{detail} | warning: {recv_detail}"
+                _record_event(events, "info" if ok and recv_ok else "warn", message)
                 continue
             if key.lower() == "s":
                 ok, detail = _quick_setup_deskflow(status.get("peer hostname", ""))
                 message = detail if ok else f"error: {detail}"
+                _record_event(events, "info" if ok else "error", detail)
                 continue
             if key.lower() == "x":
                 ok, detail = _stop_all_now()
+                _record_event(events, "info" if ok else "error", detail)
                 _clear()
                 print(_green(detail) if ok else _red(f"Shutdown incomplete: {detail}"))
                 return 0 if ok else 1
             if key.lower() == "d":
                 ok, detail = _start_deskflow_now()
                 message = detail if ok else f"error: {detail}"
+                _record_event(events, "info" if ok else "error", detail)
                 continue
             if key.lower() == "r":
                 ok, detail = _swap_deskflow_role_now()
                 message = detail if ok else f"error: {detail}"
+                _record_event(events, "info" if ok else "error", detail)
                 continue
             if key.lower() == "o":
                 ok, detail = _open_drop_folder_now()
                 message = detail if ok else f"error: {detail}"
+                _record_event(events, "info" if ok else "error", detail)

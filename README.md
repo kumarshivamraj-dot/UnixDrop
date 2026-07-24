@@ -134,6 +134,7 @@ The checked-out source tree still includes `./deskbridge` and `./scripts/*.sh` w
 
 TUI keys:
 
+- On first interactive start, `deskbridge tui` opens a small startup setup prompt for the peer IP/host and Deskflow screen name. Once the peer receiver, role, and start script are saved, later starts skip the prompt and go straight to the dashboard.
 - `s`: quick setup (Mac server, Linux client, automatic discovery, two-way clipboard)
 - `q`: close only the dashboard; background services keep running
 - `x`: stop all UnixDrop, Deskflow, discovery, and receiver background processes

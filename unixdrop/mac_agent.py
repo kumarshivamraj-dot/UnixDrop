@@ -12,19 +12,49 @@ from pathlib import Path
 from urllib import parse, request
 
 from unixdrop.clipboard_safety import is_health_check_clipboard_text
-from unixdrop.config import clipboard_pull_enabled, clipboard_send_enabled, deskflow_start_script, load_config
+from unixdrop.config import (
+    DEFAULT_CONFIG_PATH,
+    ENV_CONFIG_PATH,
+    clipboard_pull_enabled,
+    clipboard_send_enabled,
+    deskflow_start_script,
+    load_config,
+)
 from unixdrop.http_transfer import post_file
-from unixdrop.vault import build_manifest, file_sha256, should_skip_relative
+from unixdrop.vault import (
+    build_manifest,
+    file_sha256,
+    normalize_vault_relative_path,
+    should_skip_relative,
+    vault_path,
+    write_bytes_atomic,
+)
 
 
 CONFIG = load_config()
 STATE_FILE = CONFIG.state_dir / "mac_state.json"
+CONFIG_MTIME_NS: int | None = None
 DESKFLOW_RETRY_SECONDS = 30
 _DESKFLOW_RETRY_AFTER = 0.0
 _DESKFLOW_SUPERVISION_DISABLED = False
 PEER_FAILURE_RETRY_SECONDS = 10
 _PEER_RETRY_AFTER = 0.0
 _PEER_LAST_ERROR = ""
+
+
+def _active_config_path() -> Path:
+    env_path = os.environ.get(ENV_CONFIG_PATH)
+    return (Path(env_path) if env_path else DEFAULT_CONFIG_PATH).expanduser()
+
+
+def _config_mtime_ns() -> int | None:
+    try:
+        return _active_config_path().stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+CONFIG_MTIME_NS = _config_mtime_ns()
 
 
 def _default_state() -> dict:
@@ -42,6 +72,28 @@ def _default_state() -> dict:
 def _ensure_dirs() -> None:
     CONFIG.drop_dir.mkdir(parents=True, exist_ok=True)
     CONFIG.state_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _reload_config_if_changed() -> bool:
+    global CONFIG, STATE_FILE, CONFIG_MTIME_NS
+    current_mtime = _config_mtime_ns()
+    if current_mtime is None or current_mtime == CONFIG_MTIME_NS:
+        return False
+
+    try:
+        next_config = load_config()
+    except Exception as exc:
+        CONFIG_MTIME_NS = current_mtime
+        print(f"UnixDrop config reload failed: {exc}")
+        return False
+
+    CONFIG = next_config
+    STATE_FILE = CONFIG.state_dir / "mac_state.json"
+    CONFIG_MTIME_NS = current_mtime
+    _ensure_dirs()
+    _record_peer_request_success()
+    print(f"UnixDrop config reloaded from {_active_config_path()}")
+    return True
 
 
 def _start_deskflow_process() -> subprocess.Popen[str] | None:
@@ -363,7 +415,7 @@ def _post_vault_file(relative_path: str, file_path: Path) -> None:
 def _write_conflict_copy(file_path: Path, incoming_bytes: bytes, remote_sha: str) -> None:
     conflict_name = f"{file_path.stem}.linux-conflict-{remote_sha[:8]}{file_path.suffix}"
     conflict_path = file_path.with_name(conflict_name)
-    conflict_path.write_bytes(incoming_bytes)
+    write_bytes_atomic(conflict_path, incoming_bytes)
 
 
 def _sync_obsidian_vault(state: dict) -> None:
@@ -376,11 +428,17 @@ def _sync_obsidian_vault(state: dict) -> None:
         for entry in build_manifest(CONFIG.obsidian_vault_dir, CONFIG)
     }
     remote_manifest = _fetch_json("/api/vault/manifest")
-    remote_entries = {
-        entry["path"]: entry
-        for entry in remote_manifest.get("files", [])
-        if not should_skip_relative(entry["path"], CONFIG)
-    }
+    remote_entries = {}
+    for entry in remote_manifest.get("files", []):
+        if not isinstance(entry, dict) or "path" not in entry:
+            continue
+        try:
+            relative_path = normalize_vault_relative_path(str(entry["path"]))
+        except ValueError:
+            continue
+        if should_skip_relative(relative_path, CONFIG):
+            continue
+        remote_entries[relative_path] = entry
     known = state.setdefault("vault", {})
 
     all_paths = sorted(set(local_entries) | set(remote_entries))
@@ -391,16 +449,14 @@ def _sync_obsidian_vault(state: dict) -> None:
         remote = remote_entries.get(relative_path)
 
         if local and not remote:
-            _post_vault_file(relative_path, CONFIG.obsidian_vault_dir / relative_path)
+            _post_vault_file(relative_path, vault_path(CONFIG.obsidian_vault_dir, relative_path))
             known[relative_path] = local.sha256
             continue
 
         if remote and not local:
             data = _fetch_bytes("/api/vault/file?path=" + parse.quote(relative_path))
-            destination = CONFIG.obsidian_vault_dir / relative_path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(data)
-            os.utime(destination, (remote["mtime"], remote["mtime"]))
+            destination = vault_path(CONFIG.obsidian_vault_dir, relative_path)
+            write_bytes_atomic(destination, data, remote["mtime"])
             known[relative_path] = remote["sha256"]
             continue
 
@@ -411,21 +467,19 @@ def _sync_obsidian_vault(state: dict) -> None:
 
         last_synced = known.get(relative_path)
         if last_synced == remote["sha256"]:
-            _post_vault_file(relative_path, CONFIG.obsidian_vault_dir / relative_path)
+            _post_vault_file(relative_path, vault_path(CONFIG.obsidian_vault_dir, relative_path))
             known[relative_path] = local.sha256
             continue
 
         if last_synced == local.sha256:
             data = _fetch_bytes("/api/vault/file?path=" + parse.quote(relative_path))
-            destination = CONFIG.obsidian_vault_dir / relative_path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(data)
-            os.utime(destination, (remote["mtime"], remote["mtime"]))
+            destination = vault_path(CONFIG.obsidian_vault_dir, relative_path)
+            write_bytes_atomic(destination, data, remote["mtime"])
             known[relative_path] = remote["sha256"]
             continue
 
         data = _fetch_bytes("/api/vault/file?path=" + parse.quote(relative_path))
-        local_path = CONFIG.obsidian_vault_dir / relative_path
+        local_path = vault_path(CONFIG.obsidian_vault_dir, relative_path)
         _write_conflict_copy(local_path, data, remote["sha256"])
         _post_vault_file(relative_path, local_path)
         known[relative_path] = file_sha256(local_path)
@@ -440,6 +494,8 @@ def main(*, start_deskflow: bool = True) -> None:
 
     while True:
         try:
+            if _reload_config_if_changed():
+                state = _load_state()
             if start_deskflow:
                 deskflow_process = _ensure_deskflow_running(deskflow_process)
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from unixdrop.config import AppConfig
 
@@ -28,15 +30,86 @@ def file_sha256(file_path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_bytes_atomic(destination: Path, data: bytes, mtime: float | None = None) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mtime is not None and mtime > 0:
+            os.utime(temp_path, (mtime, mtime))
+        os.replace(temp_path, destination)
+        temp_path = None
+        _fsync_directory(destination.parent)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def normalize_vault_relative_path(relative_path: str) -> str:
+    raw_path = str(relative_path).strip()
+    if not raw_path:
+        raise ValueError("vault path must not be empty")
+    if "\x00" in raw_path:
+        raise ValueError("vault path must not contain NUL bytes")
+
+    candidate = PurePosixPath(raw_path)
+    if candidate.is_absolute():
+        raise ValueError("vault path must be relative")
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        raise ValueError("vault path must stay inside the vault")
+
+    normalized = str(candidate)
+    if not normalized or normalized == ".":
+        raise ValueError("vault path must not be empty")
+    return normalized
+
+
+def vault_path(vault_dir: Path, relative_path: str) -> Path:
+    normalized = normalize_vault_relative_path(relative_path)
+    root = vault_dir.resolve(strict=False)
+    destination = (root / normalized).resolve(strict=False)
+    try:
+        destination.relative_to(root)
+    except ValueError:
+        raise ValueError("vault path must stay inside the vault") from None
+    return destination
+
+
 def _normalize_patterns(config: AppConfig) -> list[str]:
     patterns = config.obsidian_excludes or []
     return list(patterns)
 
 
 def should_skip_relative(relative_path: str, config: AppConfig) -> bool:
-    normalized = relative_path.strip("/")
-    if not normalized:
-        return False
+    try:
+        normalized = normalize_vault_relative_path(relative_path)
+    except ValueError:
+        return True
 
     for pattern in _normalize_patterns(config):
         cleaned = pattern.strip("/")

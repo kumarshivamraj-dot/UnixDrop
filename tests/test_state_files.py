@@ -120,6 +120,66 @@ class StateFileTests(unittest.TestCase):
         mac_agent._record_peer_request_success()
         self.assertTrue(mac_agent._peer_request_allowed())
 
+    def test_mac_agent_reloads_config_when_file_changes(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        config_path = Path(os.environ["UNIXDROP_CONFIG"])
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload["receiver_url"] = "http://192.0.2.55:8765"
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+        mac_agent.CONFIG_MTIME_NS = 0
+        mac_agent._PEER_RETRY_AFTER = 999999999.0
+
+        self.assertTrue(mac_agent._reload_config_if_changed())
+
+        self.assertEqual(mac_agent.CONFIG.receiver_url, "http://192.0.2.55:8765")
+        self.assertTrue(mac_agent._peer_request_allowed())
+
+    def test_mac_agent_conflict_copy_uses_atomic_vault_write(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        note_path = self.root / "vault" / "note.md"
+
+        with mock.patch.object(mac_agent, "write_bytes_atomic") as write_mock:
+            mac_agent._write_conflict_copy(note_path, b"incoming", "abcdef0123456789")
+
+        write_mock.assert_called_once_with(
+            self.root / "vault" / "note.linux-conflict-abcdef01.md",
+            b"incoming",
+        )
+
+    def test_mac_agent_skips_unsafe_remote_vault_manifest_path(self) -> None:
+        mac_agent = importlib.import_module("unixdrop.mac_agent")
+        mac_agent = importlib.reload(mac_agent)
+        mac_agent.CONFIG.obsidian_enabled = True
+        mac_agent.CONFIG.obsidian_vault_dir = self.root / "vault"
+        state = {}
+
+        with (
+            mock.patch.object(
+                mac_agent,
+                "_fetch_json",
+                return_value={
+                    "files": [
+                        {
+                            "path": "../outside.md",
+                            "sha256": hashlib.sha256(b"incoming").hexdigest(),
+                            "size": 8,
+                            "mtime": 123.0,
+                        }
+                    ]
+                },
+            ),
+            mock.patch.object(mac_agent, "_fetch_bytes") as fetch_bytes_mock,
+            mock.patch.object(mac_agent, "_post_vault_file") as post_mock,
+        ):
+            mac_agent._sync_obsidian_vault(state)
+
+        fetch_bytes_mock.assert_not_called()
+        post_mock.assert_not_called()
+        self.assertFalse((self.root / "outside.md").exists())
+        self.assertEqual(state.get("vault"), {})
+
 
 if __name__ == "__main__":
     unittest.main()
